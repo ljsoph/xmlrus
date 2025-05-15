@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?target pi="instruction"?>
+<manifest>
+    <p xmlns:foo="foo">
+        <q bar="baz"/>
+    </p>
+</manifest>
