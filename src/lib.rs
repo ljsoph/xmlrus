@@ -10,10 +10,14 @@ const XMLNS_URI: &str = "http://www.w3.org/2000/xmlns/";
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
     /// Duplicate Attribute
-    DuplicateAttribute,
+    DuplicateAttribute(String, Span),
 
-    InvalidComment,
-    InvalidDeclaration,
+    /// Invalid Comment
+    InvalidComment(String, Span),
+
+    /// Invalid Declarataion
+    /// Missing `version` or unclosed declaration
+    InvalidDeclaration(String, Span),
 
     /// Invalid Processing Instruction Data
     ///
@@ -27,8 +31,6 @@ pub enum ParseError {
 
     /// Invalid Tag Name
     InvalidTagName(Span),
-
-    InvalidToken,
 
     /// Invalid XML Prefix URI
     ///
@@ -50,16 +52,14 @@ pub enum ParseError {
     /// Start and End tag of an Element must have the same prefix:local
     /// expected, actual, span
     TagNameMismatch(String, String, Span),
-    UnclosedRootElement,
-    UnclosedElement,
+
+    /// Root Node was not properly closed
+    UnclosedRoot,
 
     /// Unexpected XML Declaration encountered.
     ///
     /// If present, the Declaration must be at the start of the Document
     UnexpectedDeclaration(Span),
-
-    /// Processing Instruction was not closed
-    UnterminatedProcessingInstruction,
 
     /// Unexpected character
     ///
@@ -76,7 +76,7 @@ pub enum ParseError {
     ///
     /// An element besides a comment or PI was encountered after
     /// the root element
-    UnexpectedElement(usize),
+    UnexpectedElement(Span),
 
     /// The input stream ended unexpectedly.
     UnexpectedEndOfStream,
@@ -98,63 +98,81 @@ pub enum ParseError {
     UnknownPrefix(String, Span),
 
     /// wut
-    WTF,
+    WTF(Span),
 }
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParseError::DuplicateAttribute => todo!(),
-            ParseError::InvalidComment => todo!(),
-            ParseError::InvalidDeclaration => todo!(),
+            ParseError::DuplicateAttribute(attribute, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: duplicate attribute '{}'",
+                    span.row, span.col_start, attribute
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::InvalidComment(reason, span) => {
+                writeln!(f, "error:{}:{}: invalid comment: {}", span.row, span.col_start, reason)?;
+                writeln!(f, "{span}")
+            }
+            ParseError::InvalidDeclaration(expected, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: invalid declaration: expected [{}]",
+                    span.row, span.col_start, expected
+                )?;
+                writeln!(f, "{span}")
+            }
             ParseError::InvalidPIData(span) => {
-                writeln!(f, "error: Invalid PI data {}:{}", span.row, span.col_start)?;
+                writeln!(f, "error:{}:{}: invalid PI data", span.row, span.col_start)?;
                 writeln!(f, "{span}")
             }
             ParseError::InvalidStandalone(actual, span) => {
-                writeln!(f, "error: Invalid Standalone value {}:{}", span.row, span.col_start)?;
+                writeln!(f, "error{}:{}: invalid standalone value", span.row, span.col_start)?;
                 writeln!(f, "  Expected: [yes | no]\n  Actual:   [{actual}]")?;
                 writeln!(f, "\n{span}")
             }
             ParseError::InvalidTagName(span) => {
-                writeln!(f, "error: Invalid name at {}:{}", span.row, span.col_start)?;
+                writeln!(f, "error:{}:{}: invalid tag", span.row, span.col_start)?;
                 writeln!(f, "{span}")
             }
-            ParseError::InvalidToken => todo!(),
             ParseError::InvalidXmlPrefixUri(span) => {
                 writeln!(
                     f,
-                    "error: Invalid namespace bound to 'xml' prefix at {}:{}",
+                    "error:{}:{}: invalid namespace bound to 'xml' prefix",
                     span.row, span.col_start
                 )?;
                 writeln!(f, "{span}")
             }
-            ParseError::MissingRoot => todo!(),
+            ParseError::MissingRoot => {
+                writeln!(f, "error: no root element found")
+            }
             ParseError::ReservedPrefix(span) => {
                 writeln!(
                     f,
-                    "error: 'xmlns' is a reserved prefix and must not be used {}:{}",
+                    "error:{}:{}: 'xmlns' is a reserved prefix and must not be used",
                     span.row, span.col_start
                 )?;
                 writeln!(f, "{span}")
             }
             ParseError::TagNameMismatch(expected, actual, span) => {
-                writeln!(f, "error: Unexpected name at {}:{}", span.row, span.col_start)?;
+                writeln!(f, "error:{}:{}: unexpected tag name", span.row, span.col_start)?;
                 writeln!(f, "  Expected: '{expected}'\n  Actual:   '{actual}'")?;
                 write!(f, "{span}")
             }
-            ParseError::UnclosedRootElement => todo!(),
-            ParseError::UnclosedElement => todo!(),
-            ParseError::UnterminatedProcessingInstruction => todo!(),
-            ParseError::UnexpectedDeclaration(pos) => {
+            ParseError::UnclosedRoot => {
+                writeln!(f, "error: unclosed root element")
+            }
+            ParseError::UnexpectedDeclaration(span) => {
                 writeln!(
                     f,
-                    "error: Unexpected XML declaration {}:{}\n{}",
-                    pos.row, pos.col_start, pos
+                    "error:{}:{}: unexpected XML declaration\n{}",
+                    span.row, span.col_start, span
                 )
             }
             ParseError::UnexpectedCharacter(expected, actual, span) => {
-                writeln!(f, "error: Unexpected character at {}:{}", span.row, span.col_start)?;
+                writeln!(f, "error:{}:{}: unexpected character at", span.row, span.col_start)?;
                 writeln!(
                     f,
                     "  Expected: '{}'\n  Actual:   '{}'",
@@ -163,17 +181,18 @@ impl std::fmt::Display for ParseError {
                 write!(f, "{span}")
             }
             ParseError::UnexpectedCharacter2(expected, actual, span) => {
-                writeln!(f, "error: Unexpected character at {}:{}", span.row, span.col_start)?;
-                writeln!(f, "  Expected: {}\n  Actual:   '{}'", expected, *actual as char)?;
+                writeln!(f, "error:{}:{}: unexpected character", span.row, span.col_start)?;
+                writeln!(f, "  expected: {}\n  actual:   '{}'", expected, *actual as char)?;
                 writeln!(f, "{span}")
             }
-            ParseError::UnexpectedElement(pos) => {
-                writeln!(f, "Unexpected Element at {pos}")
+            ParseError::UnexpectedElement(span) => {
+                writeln!(f, "error:{}:{}: unexpected element", span.row, span.col_start)?;
+                writeln!(f, "{span}")
             }
             ParseError::UnexpectedXmlUri(span) => {
                 writeln!(
                     f,
-                    "error: 'xml' namespace URI bound to non 'xml' prefix at {}:{}",
+                    "error:{}:{}: 'xml' namespace URI bound to non 'xml' prefix",
                     span.row, span.col_start
                 )?;
                 writeln!(f, "{span}")
@@ -181,7 +200,7 @@ impl std::fmt::Display for ParseError {
             ParseError::UnexpectedXmlnsUri(span) => {
                 writeln!(
                     f,
-                    "error: `xmlns` URI must not be declared {}:{}",
+                    "error:{}:{}: `xmlns` URI must not be declared",
                     span.row, span.col_start
                 )?;
                 writeln!(f, "{span}")
@@ -189,13 +208,20 @@ impl std::fmt::Display for ParseError {
             ParseError::UnknownPrefix(prefix, span) => {
                 writeln!(
                     f,
-                    "error: unknown namespace prefix `{}` at {}:{}",
+                    "error:{}:{}: unknown namespace prefix `{}`",
                     prefix, span.row, span.col_start
                 )?;
                 writeln!(f, "{span}")
             }
-            ParseError::UnexpectedEndOfStream => write!(f, "error: Unexpected end of stream"),
-            ParseError::WTF => todo!(),
+            ParseError::UnexpectedEndOfStream => write!(f, "error: unexpected end of stream"),
+            ParseError::WTF(span) => {
+                write!(
+                    f,
+                    "error:{}:{}: something unexpected happened",
+                    span.row, span.col_start
+                )?;
+                writeln!(f, "{span}")
+            }
         }
     }
 }
@@ -625,7 +651,10 @@ impl<'a> TokenStream<'a> {
         self.consume_whitespace();
 
         if !self.peek_seq("version") {
-            return Err(ParseError::InvalidDeclaration);
+            return Err(ParseError::InvalidDeclaration(
+                String::from("version attribute"),
+                self.span(self.pos, self.pos + 1),
+            ));
         }
 
         self.advance(7);
@@ -665,7 +694,10 @@ impl<'a> TokenStream<'a> {
 
         self.consume_whitespace();
         if !self.peek_seq("?>") {
-            return Err(ParseError::InvalidDeclaration);
+            return Err(ParseError::InvalidDeclaration(
+                String::from("?>"),
+                self.span(self.pos, self.pos + 1),
+            ));
         }
 
         self.advance(2);
@@ -983,7 +1015,8 @@ impl<'a> TokenStream<'a> {
             }
 
             if let Ok(b'\n') = self.current_byte() {
-                return Err(ParseError::InvalidComment);
+                let span = self.span(start, self.pos);
+                return Err(ParseError::InvalidComment(String::from("unclosed comment"), span));
             }
 
             // For compatibility, the string "--" (double-hyphen) must not occur within comments.
@@ -992,8 +1025,11 @@ impl<'a> TokenStream<'a> {
                     break;
                 }
 
-                // TODO Update Error type
-                return Err(ParseError::InvalidComment);
+                let span = self.span(start, self.pos + 2);
+                return Err(ParseError::InvalidComment(
+                    String::from("double-hyphens (--) are not allowed inside comments"),
+                    span,
+                ));
             }
 
             self.advance(1);
@@ -1028,7 +1064,7 @@ impl<'a> TokenStream<'a> {
                 b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
                 // Start of the root node, break and parse outside of the loop.
                 b'<' => break,
-                _ => return Err(ParseError::WTF),
+                _ => return Err(ParseError::WTF(self.span_single())),
             }
         }
 
@@ -1040,6 +1076,10 @@ impl<'a> TokenStream<'a> {
 
         self.parse_element()?;
 
+        if !self.temp_elements.is_empty() {
+            return Err(ParseError::UnclosedRoot);
+        }
+
         // Parse any comments or PIs after the root node
         while !self.is_at_end() {
             match self.unchecked_current_byte() {
@@ -1048,7 +1088,7 @@ impl<'a> TokenStream<'a> {
                 }
                 b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
                 b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
-                _ => return Err(ParseError::UnexpectedElement(self.pos)),
+                _ => return Err(ParseError::UnexpectedElement(self.span(self.pos, self.pos + 1))),
             }
         }
 
@@ -1220,7 +1260,11 @@ impl<'a> TokenStream<'a> {
                     // Attribute
                     else {
                         if current.attributes.iter().any(|a| a.name == local) {
-                            return Err(ParseError::DuplicateAttribute);
+                            let start = self.pos - local.len() - value.len() - 3;
+                            return Err(ParseError::DuplicateAttribute(
+                                local.to_string(),
+                                self.span(start, self.pos),
+                            ));
                         }
 
                         current.attributes.push(Attribute { name: local, value });
@@ -1284,7 +1328,7 @@ impl<'a> TokenStream<'a> {
 mod test {
     use super::*;
 
-    fn stream_from(source: &str) -> TokenStream {
+    fn stream_from(source: &str) -> TokenStream<'_> {
         TokenStream {
             source,
             pos: 0,
@@ -1298,7 +1342,7 @@ mod test {
         }
     }
 
-    fn stream_with_element(source: &str) -> TokenStream {
+    fn stream_with_element(source: &str) -> TokenStream<'_> {
         TokenStream {
             source,
             pos: 0,
@@ -1376,7 +1420,7 @@ mod test {
     fn test_parse_declaration_invalid_missing_version() {
         let mut stream = stream_from(r#"<?xml encoding="UTF-8"?>"#);
         let res = stream.parse_declaration();
-        assert_eq!(Err(ParseError::InvalidDeclaration), res);
+        assert!(matches!(res, Err(ParseError::InvalidDeclaration(_, _))));
     }
 
     #[test]
@@ -1390,7 +1434,7 @@ mod test {
     fn test_parse_unclosed_declaration() {
         let mut stream = stream_from(r#"<?xml version="1.0" encoding="UTF-8" "#);
         let res = stream.parse_declaration();
-        assert!(matches!(res, Err(ParseError::InvalidDeclaration)));
+        assert!(matches!(res, Err(ParseError::InvalidDeclaration(_, _))));
     }
 
     #[test]
@@ -1755,6 +1799,6 @@ mod test {
     #[test]
     fn test_parse_element_duplicate_attribute() {
         let res = Parser::parse(r#"<name some="value" some="value"/>"#);
-        assert!(matches!(res, Err(ParseError::DuplicateAttribute)));
+        assert!(matches!(res, Err(ParseError::DuplicateAttribute(_, _))));
     }
 }
