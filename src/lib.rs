@@ -692,6 +692,9 @@ impl<'a> TokenStream<'a> {
             None
         };
 
+        // TODO: While it is valid for the declaration to span multiple lines, if there is no '?>'
+        // and the next non-whitespace character is the next element, the diagnostics will report
+        // the incorrect source line.
         self.consume_whitespace();
         if !self.peek_seq("?>") {
             return Err(ParseError::InvalidDeclaration(
