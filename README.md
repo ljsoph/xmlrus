@@ -1,12 +1,12 @@
 # XML'R'Us
 
-A minimal XML Parser with partial namespace support (don't expect it to be perfect).
+A minimal XML Parser with partial namespace support.
 
 ## Basic Usage
 
 ```rust
 fn main() {
-    let source = &std::fs::read_to_string("tests/test.xml").unwrap_or_default();
+    let source = &std::fs::read_to_string("some_file.xml").unwrap_or_default();
     let document = match xmlrus::Parser::parse(source) {
         Ok(document) => document,
         Err(err) => {
@@ -85,16 +85,7 @@ Document {
 
 ---
 
-The parser also aims to provide useful error messages for malformed XML documents (not 100% implemented)
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<manifest>
-    <p xmlns:xml="foo"/>
-</manifest>
-```
-
-outputs
+The parser also aims to provide useful error messages for malformed XML documents.
 
 ```shell
 error: Invalid namespace bound to 'xml' prefix at 3:19
@@ -103,5 +94,3 @@ error: Invalid namespace bound to 'xml' prefix at 3:19
    |                   ^^^
    |
 ```
-
-
