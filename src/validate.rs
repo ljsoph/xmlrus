@@ -13,10 +13,10 @@ pub fn is_valid_name(name: &str) -> bool {
     let mut chars = name.chars();
 
     // The first character of a Name MUST be a NameStartChar, and any other characters MUST be NameChars;
-    if let Some(first_char) = chars.next() {
-        if !is_name_start_char(first_char) {
-            return false;
-        }
+    if let Some(first_char) = chars.next()
+        && !is_name_start_char(first_char)
+    {
+        return false;
     }
 
     chars.all(is_name_char)

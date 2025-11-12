@@ -294,7 +294,7 @@ impl<'a> Document<'a> {
                     }
 
                     if !children.is_empty() {
-                        elements.extend(walk(&children, tag_name));
+                        elements.extend(walk(children, tag_name));
                     }
                 }
             }
@@ -618,7 +618,7 @@ impl<'a> TokenStream<'a> {
             parent_id = current.parent_id;
         }
 
-        while let Some(parent) = elements.next() {
+        for parent in elements {
             // Skip siblings
             if parent_id != Some(parent.id) {
                 continue;
@@ -1098,11 +1098,7 @@ impl<'a> TokenStream<'a> {
     fn emit_token(&mut self, token: Token<'a>) -> ParseResult<()> {
         match token {
             Token::ElementStart { prefix, local } => {
-                let parent_id = match self.temp_elements.last() {
-                    Some(parent) => Some(parent.id),
-                    None => None,
-                };
-
+                let parent_id = self.temp_elements.last().map(|parent| parent.id);
                 self.temp_elements.push(TempElementData {
                     prefix,
                     local,
