@@ -1,5 +1,0 @@
-- [ ] Fill out README
-- [ ] Error Messages
-- [ ] Text Span improvements
-- [ ] Namespaces
-- [ ] Handle undeclared QName/Namespace
