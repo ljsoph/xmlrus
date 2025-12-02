@@ -1,76 +1,167 @@
-use xmlrus::ParseError;
-use xmlrus::Parser;
+#[rustfmt::skip]
+mod ibm_valid {
+    use paste::paste;
 
-fn source(test_file: &str) -> String {
-    std::fs::read_to_string(format!("tests/test_files/{test_file}.xml")).unwrap_or_default()
-}
+    macro_rules! ibm_valid {
+        ($test_name:ident, $reason:literal) => {
+            paste! {
+            #[test]
+            fn [<$test_name>]() {
+            let source = std::fs::read_to_string(format!("tests/test_files/ibm/valid/{}.xml", stringify!($test_name))).unwrap_or_default();
+            let res = xmlrus::Parser::parse(&source);
+            assert!(res.is_ok(), $reason);
+            }
+            }
+        };
+    }
 
-#[test]
-fn test_unclosed_root() {
-    let source = source("unclosed_root");
-    let res = xmlrus::Parser::parse(&source);
-    assert!(matches!(res, Err(ParseError::UnexpectedEndOfStream)))
-}
-
-#[test]
-fn test_unclosed_root_2() {
-    let source = source("unclosed_root_2");
-    let res = xmlrus::Parser::parse(&source);
-    assert!(matches!(res, Err(ParseError::UnexpectedCharacter(_, _, _))))
-}
-
-#[test]
-fn declaration_ok() {
-    let source = source("declaration_ok");
-    let res = Parser::parse(&source);
-    assert!(res.is_ok());
-}
-
-#[test]
-fn declaration_ok_2() {
-    let source = source("declaration_ok_2");
-    let res = Parser::parse(&source);
-    assert!(res.is_ok());
-}
-
-#[test]
-fn declaration_ok_standalone() {
-    let source = source("declaration_ok_standalone");
-    let res = Parser::parse(&source);
-    assert!(res.is_ok());
-}
-
-#[test]
-fn declaration_invalid_standalone() {
-    let source = source("declaration_invalid_standalone");
-    let res = Parser::parse(&source);
-    assert!(matches!(res, Err(ParseError::InvalidStandalone(_, _))))
-}
-
-#[test]
-fn declaration_missing_version() {
-    let source = source("declaration_missing_version");
-    let res = Parser::parse(&source);
-    assert!(matches!(res, Err(ParseError::InvalidDeclaration(_, _))))
-}
-
-#[test]
-fn unclosed_declaration() {
-    let source = source("declaration_unclosed");
-    let res = Parser::parse(&source);
-    assert!(matches!(res, Err(ParseError::InvalidDeclaration(_, _))));
-}
-
-#[test]
-fn duplicate_declaration() {
-    let source = source("declaration_duplicate");
-    let res = Parser::parse(&source);
-    assert!(matches!(res, Err(ParseError::UnexpectedDeclaration(_))));
-}
-
-#[test]
-fn declaration_not_first() {
-    let source = source("declaration_not_first");
-    let res = Parser::parse(&source);
-    assert!(matches!(res, Err(ParseError::UnexpectedDeclaration(_))));
+    ibm_valid!(ibm01v01, "Tests with a xml document consisting of <EM>prolog</EM> followed by <EM>element</EM> then <EM>Misc</EM>");
+    ibm_valid!(ibm02v01, "Tests <B>Char</B> with 3 characters - 2 boundaries plus 1 in the middle - for each range plus #x20 #x9 #xD #xA");
+    ibm_valid!(ibm03v01, "Tests all 4 legal white space characters - #x20 #x9 #xD #xA");
+    ibm_valid!(ibm09v01, "Tests Empty EntityValue");
+    ibm_valid!(ibm09v02, "Tests a normal EnitityValue");
+    ibm_valid!(ibm09v03, "Tests EnitityValue referencing a Parameter Entity");
+    ibm_valid!(ibm09v04, "Tests EnitityValue referencing a General Entity");
+    ibm_valid!(ibm09v05, "Tests EnitityValue with combination of GE, PE and text, the GE used is declared in the student.dtd");
+    ibm_valid!(ibm10v01, "Tests empty AttValue with double quotes as the delimiters");
+    ibm_valid!(ibm10v02, "Tests empty AttValue with single quotes as the delimiters");
+    ibm_valid!(ibm10v03, "Tests AttValue with double quotes as the delimiters and single quote inside");
+    ibm_valid!(ibm10v04, "Tests AttValue with single quotes as the delimiters and double quote inside");
+    ibm_valid!(ibm10v05, "Tests AttValue with a GE reference and double quotes as the delimiters");
+    ibm_valid!(ibm10v06, "Tests AttValue with a GE reference and single quotes as the delimiters");
+    ibm_valid!(ibm10v07, "Tests AttValue with mixed references and text content in double quotes");
+    ibm_valid!(ibm10v08, "Tests AttValue with mixed references and text content in single quotes");
+    ibm_valid!(ibm11v01, "Tests empty systemliteral using the double quotes");
+    ibm_valid!(ibm11v02, "Tests empty systemliteral using the single quotes");
+    ibm_valid!(ibm11v03, "Tests regular systemliteral using the single quotes");
+    ibm_valid!(ibm11v04, "Tests regular systemliteral using the double quotes");
+    ibm_valid!(ibm12v01, "Tests empty systemliteral using the double quotes");
+    ibm_valid!(ibm12v02, "Tests empty systemliteral using the single quotes");
+    ibm_valid!(ibm12v03, "Tests regular systemliteral using the double quotes");
+    ibm_valid!(ibm12v04, "Tests regular systemliteral using the single quotes");
+    ibm_valid!(ibm13v01, "Tests PubidChar with all legal PubidChar in a PubidLiteral");
+    ibm_valid!(ibm14v01, "Tests CharData with empty string");
+    ibm_valid!(ibm14v02, "Tests CharData with white space character");
+    ibm_valid!(ibm14v03, "Tests CharData with a general text string");
+    ibm_valid!(ibm15v01, "Tests empty comment");
+    ibm_valid!(ibm15v02, "Tests comment with regular text");
+    ibm_valid!(ibm15v03, "Tests comment with one dash inside");
+    ibm_valid!(ibm15v04, "Tests comment with more comprehensive content");
+    ibm_valid!(ibm16v01, "Tests PI definition with only PItarget name and nothing else");
+    ibm_valid!(ibm16v02, "Tests PI definition with only PItarget name and a white space");
+    ibm_valid!(ibm16v03, "Tests PI definition with PItarget name and text that contains question mark and right angle");
+    ibm_valid!(ibm17v01, "Tests PITarget name");
+    ibm_valid!(ibm18v01, "Tests CDSect with CDStart CData CDEnd");
+    ibm_valid!(ibm19v01, "Tests CDStart");
+    ibm_valid!(ibm20v01, "Tests CDATA with empty string");
+    ibm_valid!(ibm20v02, "Tests CDATA with regular content");
+    ibm_valid!(ibm21v01, "Tests CDEnd");
+    ibm_valid!(ibm22v01, "Tests prolog with XMLDecl and doctypedecl");
+    ibm_valid!(ibm22v02, "Tests prolog with doctypedecl");
+    ibm_valid!(ibm22v03, "Tests prolog with Misc doctypedecl");
+    ibm_valid!(ibm22v04, "Tests prolog with doctypedecl Misc");
+    ibm_valid!(ibm22v05, "Tests prolog with XMLDecl Misc doctypedecl");
+    ibm_valid!(ibm22v06, "Tests prolog with XMLDecl doctypedecl Misc");
+    ibm_valid!(ibm22v07, "Tests prolog with XMLDecl Misc doctypedecl Misc");
+    ibm_valid!(ibm23v01, "Tests XMLDecl with VersionInfo only");
+    ibm_valid!(ibm23v02, "Tests XMLDecl with VersionInfo EncodingDecl");
+    ibm_valid!(ibm23v03, "Tests XMLDecl with VersionInfo SDDecl");
+    ibm_valid!(ibm23v04, "Tests XMLDecl with VerstionInfo and a trailing whitespace char");
+    ibm_valid!(ibm23v05, "Tests XMLDecl with VersionInfo EncodingDecl SDDecl");
+    ibm_valid!(ibm23v06, "Tests XMLDecl with VersionInfo EncodingDecl SDDecl and a trailing whitespace");
+    ibm_valid!(ibm24v01, "Tests VersionInfo with single quote");
+    ibm_valid!(ibm24v02, "Tests VersionInfo with double quote");
+    ibm_valid!(ibm25v01, "Tests EQ with =");
+    ibm_valid!(ibm25v02, "Tests EQ with = and spaces on both sides");
+    ibm_valid!(ibm25v03, "Tests EQ with = and space in front of it");
+    ibm_valid!(ibm25v04, "Tests EQ with = and space after it");
+    ibm_valid!(ibm26v01, "Tests VersionNum 1.0");
+    ibm_valid!(ibm27v01, "Tests Misc with comment");
+    ibm_valid!(ibm27v02, "Tests Misc with PI");
+    ibm_valid!(ibm27v03, "Tests Misc with white spaces");
+    ibm_valid!(ibm28v01, "Tests doctypedecl with internal DTD only");
+    ibm_valid!(ibm28v02, "Tests doctypedecl with external subset and combinations of different markup declarations and PEReferences");
+    ibm_valid!(ibm29v01, "Tests markupdecl with combinations of elementdecl, AttlistDecl,EntityDecl, NotationDecl, PI and comment");
+    ibm_valid!(ibm29v02, "Tests WFC: PE in internal subset as a positive test");
+    ibm_valid!(ibm30v01, "Tests extSubset with extSubsetDecl only in the dtd file");
+    ibm_valid!(ibm30v02, "Tests extSubset with TextDecl and extSubsetDecl in the dtd file");
+    ibm_valid!(ibm31v01, "Tests extSubsetDecl with combinations of markupdecls, conditionalSects, PEReferences and white spaces");
+    ibm_valid!(ibm32v01, "Tests VC: Standalone Document Declaration with absent attribute that has default value and standalone is no");
+    ibm_valid!(ibm32v02, "Tests VC: Standalone Document Declaration with external entity reference and standalone is no");
+    ibm_valid!(ibm32v03, "Tests VC: Standalone Document Declaration with attribute values that need to be normalized and standalone is no");
+    ibm_valid!(ibm32v04, "Tests VC: Standalone Document Declaration with whitespace in mixed content and standalone is no");
+    ibm_valid!(ibm33v01, "Tests LanguageID with Langcode - Subcode");
+    ibm_valid!(ibm34v01, "Duplicate Test as ibm33v01.xml");
+    ibm_valid!(ibm35v01, "Tests ISO639Code");
+    ibm_valid!(ibm36v01, "Tests IanaCode");
+    ibm_valid!(ibm37v01, "Tests UserCode");
+    ibm_valid!(ibm38v01, "Tests SubCode");
+    ibm_valid!(ibm39v01, "Tests element with EmptyElemTag and STag content Etag, also tests the VC: Element Valid with elements that have children, Mixed and ANY contents");
+    ibm_valid!(ibm40v01, "Tests STag with possible combinations of its fields, also tests WFC: Unique Att Spec.");
+    ibm_valid!(ibm41v01, "Tests Attribute with Name Eq AttValue and VC: Attribute Value Type");
+    ibm_valid!(ibm42v01, "Tests ETag with possible combinations of its fields");
+    ibm_valid!(ibm43v01, "Tests content with all possible constructs: element, CharData, Reference, CDSect, Comment");
+    ibm_valid!(ibm44v01, "Tests EmptyElemTag with possible combinations of its fields");
+    ibm_valid!(ibm45v01, "Tests both P45 elementDecl and P46 contentspec with possible combinations of their constructs");
+    ibm_valid!(ibm47v01, "Tests all possible children,cp,choice,seq patterns in P47,P48,P49,P50");
+    ibm_valid!(ibm49v01, "Tests VC:Proper Group/PE Nesting with PEs of choices that are properly nested with parenthesized groups in external subsets");
+    ibm_valid!(ibm50v01, "Tests VC:Proper Group/PE Nesting with PEs of seq that are properly nested with parenthesized groups in external subsets");
+    ibm_valid!(ibm51v01, "Tests Mixed with possible combinations of its fields amd VC: No Duplicate Types");
+    ibm_valid!(ibm51v02, "Tests VC:Proper Group/PE Nesting with PEs of Mixed that are properly nested with parenthesized groups in external subsets");
+    ibm_valid!(ibm52v01, "Tests all AttlistDecl and AttDef Patterns in P52 and P53");
+    ibm_valid!(ibm54v01, "Tests all AttTypes : StringType, TokenizedTypes, EnumeratedTypes in P55,P56,P57,P58,P59.  Also tests all DefaultDecls in P60.");
+    ibm_valid!(ibm54v02, "Tests all AttTypes : StringType, TokenizedType, EnumeratedTypes in P55,P56,P57.");
+    ibm_valid!(ibm54v03, "Tests AttTypes with StringType in P55.");
+    ibm_valid!(ibm55v01, "Tests StringType for P55. The \"CDATA\" occurs in the StringType for the attribute \"att\" for the element \"a\".");
+    ibm_valid!(ibm56v01, "Tests TokenizedType for P56. The \"ID\", \"IDREF\", \"IDREFS\", \"ENTITY\", \"ENTITIES\", \"NMTOKEN\", and \"NMTOKENS\" occur in the TokenizedType for the attribute \"attr\".");
+    ibm_valid!(ibm56v02, "Tests TokenizedType for P56 VC: ID Attribute Default. The value \"AC1999\" is assigned to the ID attribute \"attr\" with \"#REQUIRED\" in the DeaultDecl.");
+    ibm_valid!(ibm56v03, "Tests TokenizedType for P56 VC: ID Attribute Default. The value \"AC1999\" is assigned to the ID attribute \"attr\" with \"#IMPLIED\" in the DeaultDecl.");
+    ibm_valid!(ibm56v04, "Tests TokenizedType for P56 VC: ID. The ID attribute \"UniqueName\" appears only once in the document.");
+    ibm_valid!(ibm56v05, "Tests TokenizedType for P56 VC: One ID per element type. The element \"a\" or \"b\" has only one ID attribute");
+    ibm_valid!(ibm56v06, "Tests TokenizedType for P56 VC: IDREF. The IDREF value \"AC456\" matches the value assigned to an ID attribute \"UniqueName\".");
+    ibm_valid!(ibm56v07, "Tests TokenizedType for P56 VC: IDREF. The IDREFS value \"AC456 Q123\" matches the values assigned to the ID attribute \"UniqueName\" and \"Uname\".");
+    ibm_valid!(ibm56v08, "Tests TokenizedType for P56 VC: Entity Name. The value \"image\" of the ENTITY attribute \"sun\" matches the name of an unparsed entity declared.");
+    ibm_valid!(ibm56v09, "Tests TokenizedType for P56 VC: Name Token. The value of the NMTOKEN attribute \"thistoken\" matches the Nmtoken production.");
+    ibm_valid!(ibm56v10, "Tests TokenizedType for P56 VC: Name Token. The value of the NMTOKENS attribute \"thistoken\" matches the Nmtoken production.");
+    ibm_valid!(ibm57v01, "Tests EnumeratedType in the AttType. The attribute \"att\" has a type (a|b) with the element \"a\".");
+    ibm_valid!(ibm58v01, "Tests NotationType for P58. It shows different patterns fro the NOTATION attribute \"attr\".");
+    ibm_valid!(ibm58v02, "Tests NotationType for P58: Notation Attributes. The value \"base64\" of the NOTATION attribute \"attr\" matches one of the notation names declared.");
+    ibm_valid!(ibm59v01, "Tests Enumeration in the EnumeratedType for P59. It shows different patterns for the Enumeration attribute \"attr\"");
+    ibm_valid!(ibm59v02, "Tests Enumeration for P59 VC: Enumeration. The value \"one\" of the Enumeration attribute \"attr\" matches one of the element names declared.");
+    ibm_valid!(ibm60v01, "Tests DefaultDecl for P60. It shows different options \"#REQUIRED\", \"#FIXED\", \"#IMPLIED\", and default for the attribute \"chapter\".");
+    ibm_valid!(ibm60v02, "Tests DefaultDecl for P60 VC: Required Attribute. In the element \"one\" and \"two\" the value of the #REQUIRED attribute \"chapter\" is given.");
+    ibm_valid!(ibm60v03, "Tests DefaultDecl for P60 VC: Fixed Attribute Default. The value of the #FIXED attribute \"chapter\" is exactly the same as the default value.");
+    ibm_valid!(ibm60v04, "Tests DefaultDecl for P60 VC: Attribute Default Legal. The default value specified for the attribute \"attr\" meets the lexical constraints of the declared attribute type.");
+    ibm_valid!(ibm61v01, "Tests conditionalSect for P61. It takes the option \"invludeSect\" in the file ibm61v01.dtd.");
+    ibm_valid!(ibm61v02, "Tests conditionalSect for P61. It takes the option \"ignoreSect\" in the file ibm61v02.dtd.");
+    ibm_valid!(ibm62v01, "Tests includeSect for P62. The white space is not included before the key word \"INCLUDE\" in the beginning sequence.");
+    ibm_valid!(ibm62v02, "Tests includeSect for P62. The white space is not included after the key word \"INCLUDE\" in the beginning sequence.");
+    ibm_valid!(ibm62v03, "Tests includeSect for P62. The white space is included after the key word \"INCLUDE\" in the beginning sequence.");
+    ibm_valid!(ibm62v04, "Tests includeSect for P62. The white space is included before the key word \"INCLUDE\" in the beginning sequence.");
+    ibm_valid!(ibm62v05, "Tests includeSect for P62. The extSubsetDecl is not included.");
+    ibm_valid!(ibm63v01, "Tests ignoreSect for P63. The white space is not included before the key word \"IGNORE\" in the beginning sequence.");
+    ibm_valid!(ibm63v02, "Tests ignoreSect for P63. The white space is not included after the key word \"IGNORE\" in the beginning sequence.");
+    ibm_valid!(ibm63v03, "Tests ignoreSect for P63. The white space is included after the key word \"IGNORE\" in the beginning sequence.");
+    ibm_valid!(ibm63v04, "Tests ignoreSect for P63. The ignireSectContents is included.");
+    ibm_valid!(ibm63v05, "Tests ignoreSect for P63. The white space is included before and after  the key word \"IGNORE\" in the beginning sequence.");
+    ibm_valid!(ibm64v01, "Tests ignoreSectContents for P64. One \"ignore\" field is included.");
+    ibm_valid!(ibm64v02, "Tests ignoreSectContents for P64. Two \"ignore\" and one \"ignoreSectContents\" fields are included.");
+    ibm_valid!(ibm64v03, "Tests ignoreSectContents for P64. Four \"ignore\" and three \"ignoreSectContents\" fields are included.");
+    ibm_valid!(ibm65v01, "Tests Ignore for P65. An empty string occurs in the Ignore filed.");
+    ibm_valid!(ibm65v02, "Tests Ignore for P65. An string not including the brackets occurs in each of the Ignore filed.");
+    ibm_valid!(ibm66v01, "Tests all legal CharRef's. ");
+    ibm_valid!(ibm67v01, "Tests Reference could be EntityRef or CharRef.");
+    ibm_valid!(ibm68v01, "Tests P68 VC:Entity Declared with Entities in External Subset, standalone is no");
+    ibm_valid!(ibm68v02, "Tests P68 VC:Entity Declared with Entities in External Parameter Entities, standalone is no");
+    ibm_valid!(ibm69v01, "Tests P68 VC:Entity Declared with Parameter Entities in External Subset, standalone is no");
+    ibm_valid!(ibm69v02, "Tests P68 VC:Entity Declared with Parameter Entities in External Parameter Entities, standalone is no");
+    ibm_valid!(ibm70v01, "Tests all legal GEDecls and PEDecls constructs derived from P70-76");
+    ibm_valid!(ibm78v01, "Tests ExtParsedEnt, also TextDecl in P77 and EncodingDecl in P80");
+    ibm_valid!(ibm79v01, "Tests extPE");
+    ibm_valid!(ibm82v01, "Tests NotationDecl in P82 and PublicID in P83");
+    ibm_valid!(ibm85v01, "This test case covers 149 legal character ranges plus 51 single legal characters for BaseChar in P85 using a PI target Name");
+    ibm_valid!(ibm86v01, "This test case covers 2 legal character ranges plus 1 single legal characters for IdeoGraphic in P86 using a PI target Name");
+    ibm_valid!(ibm87v01, "This test case covers 65 legal character ranges plus 30 single legal characters for CombiningChar in P87 using a PI target Name");
+    ibm_valid!(ibm88v01, "This test case covers 15 legal character ranges for Digit in P88 using a PI target Name");
+    ibm_valid!(ibm89v01, "This test case covers 3 legal character ranges plus 8 single legal characters for Extender in P89 using a PI target Name");
 }
