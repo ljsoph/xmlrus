@@ -5,12 +5,12 @@ mod ibm_valid {
     macro_rules! ibm_valid {
         ($test_name:ident, $reason:literal) => {
             paste! {
-            #[test]
-            fn [<$test_name>]() {
-            let source = std::fs::read_to_string(format!("tests/test_files/ibm/valid/{}.xml", stringify!($test_name))).unwrap_or_default();
-            let res = xmlrus::Parser::parse(&source);
-            assert!(res.is_ok(), $reason);
-            }
+                #[test]
+                fn [<$test_name>]() {
+                    let source = std::fs::read_to_string(format!("tests/test_files/ibm/valid/{}.xml", stringify!($test_name))).unwrap_or_default();
+                    let res = xmlrus::Parser::parse(&source);
+                    assert!(res.is_ok(), $reason);
+                }
             }
         };
     }
