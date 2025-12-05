@@ -1,3 +1,5 @@
+use crate::{ParseError, ParseResult, TokenStream};
+
 // NameStartChar ::=   ":" | [A-Z] | "_" | [a-z] | [#xC0-#xD6] | [#xD8-#xF6] | [#xF8-#x2FF] | [#x370-#x37D]
 //                    | [#x37F-#x1FFF] | [#x200C-#x200D] | [#x2070-#x218F] | [#x2C00-#x2FEF] | [#x3001-#xD7FF] | [#xF900-#xFDCF] | [#xFDF0-#xFFFD] | [#x10000-#xEFFFF]
 // NameChar      ::=   NameStartChar | "-" | "." | [0-9] | #xB7 | [#x0300-#x036F] | [#x203F-#x2040]
@@ -5,21 +7,28 @@
 // Names         ::=   Name (#x20 Name)*
 // Nmtoken       ::=   (NameChar)+
 // Nmtokens      ::=   Nmtoken (#x20 Nmtoken)*
-pub fn is_valid_name(name: &str) -> bool {
-    if name.len() <= 1 {
-        return false;
-    }
-
-    let mut chars = name.chars();
+pub fn is_valid_name(name: &str, start: usize, token_stream: &mut TokenStream) -> ParseResult<()> {
+    let mut chars = name.char_indices();
 
     // The first character of a Name MUST be a NameStartChar, and any other characters MUST be NameChars;
-    if let Some(first_char) = chars.next()
+    if let Some((index, first_char)) = chars.next()
         && !is_name_start_char(first_char)
     {
-        return false;
+        let start = start + index;
+        return Err(ParseError::InvalidXmlChar(
+            first_char,
+            token_stream.span(start, start + 1),
+        ));
     }
 
-    chars.all(is_name_char)
+    for (index, value) in chars {
+        if !is_name_char(value) {
+            let start = start + index;
+            return Err(ParseError::InvalidXmlChar(value, token_stream.span(start, start + 1)));
+        }
+    }
+
+    Ok(())
 }
 
 pub fn is_name_start_char(value: char) -> bool {
@@ -81,10 +90,11 @@ pub fn is_xml_char(value: char) -> bool {
 }
 
 /// Validate a String contains only characters in the XML Character Range
-pub fn is_xml_chars(seq: &str) -> Result<(), (usize, char)> {
+pub fn is_xml_chars(seq: &str, start: usize, token_stream: &mut TokenStream) -> ParseResult<()> {
     for (index, value) in seq.char_indices() {
         if !is_xml_char(value) {
-            return Err((index, value));
+            let start = start + index;
+            return Err(ParseError::InvalidXmlChar(value, token_stream.span(start, start + 1)));
         }
     }
 

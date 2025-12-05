@@ -12,28 +12,18 @@ pub enum ParseError {
     /// Duplicate Attribute
     DuplicateAttribute(String, Span),
 
-    /// Invalid Comment
-    InvalidComment(String, Span),
-
-    /// Invalid Declarataion
-    /// Missing `version` or unclosed declaration
-    InvalidDeclaration(String, Span),
-
-    /// Invalid Processing Instruction Data
-    ///
-    /// Processing Instruction data does not contain valid XML characters
-    InvalidPIData(char, Span),
-
-    /// Invalid CData
-    ///
-    /// CData does not contain valid XML characters
-    InvalidCData(char, Span),
-
     /// Invalid Character Data
     ///
     /// Unescaped ampersands (`&`) and left angle brackets (`<`) will be parsed as separate errors.
     /// This error represents a [`CharData`] that contains the CDATA-section-close delimiter `]]>`
     InvalidCharData(Span),
+
+    /// Invalid Comment
+    InvalidComment(String, Span),
+
+    /// Invalid Declaration
+    /// Missing `version` or unclosed declaration
+    InvalidDeclaration(String, Span),
 
     /// Invalid Standalone
     ///
@@ -43,9 +33,12 @@ pub enum ParseError {
     /// Invalid Tag Name
     InvalidTagName(Span),
 
+    /// Invalid XML character
+    InvalidXmlChar(char, Span),
+
     /// Invalid XML Prefix URI
     ///
-    /// The `xml` prefis must be bound to the `http://www.w3.org/XML/1998/namespace` namespace name
+    /// The `xml` prefix must be bound to the `http://www.w3.org/XML/1998/namespace` namespace name
     InvalidXmlPrefixUri(Span),
 
     /// Missing Root Node
@@ -123,14 +116,6 @@ impl std::fmt::Display for ParseError {
                 )?;
                 writeln!(f, "{span}")
             }
-            ParseError::InvalidCData(c, span) => {
-                writeln!(
-                    f,
-                    "error:{}:{}: CDATA contains invalid character {:?}",
-                    span.row, span.col_start, c
-                )?;
-                writeln!(f, "{span}")
-            }
             ParseError::InvalidCharData(span) => {
                 writeln!(
                     f,
@@ -151,14 +136,6 @@ impl std::fmt::Display for ParseError {
                 )?;
                 writeln!(f, "{span}")
             }
-            ParseError::InvalidPIData(c, span) => {
-                writeln!(
-                    f,
-                    "error:{}:{}: PI contained invalid character {:?}",
-                    span.row, span.col_start, c
-                )?;
-                writeln!(f, "{span}")
-            }
             ParseError::InvalidStandalone(actual, span) => {
                 writeln!(f, "error{}:{}: invalid standalone value", span.row, span.col_start)?;
                 writeln!(f, "  Expected: [yes | no]\n  Actual:   [{actual}]")?;
@@ -166,6 +143,14 @@ impl std::fmt::Display for ParseError {
             }
             ParseError::InvalidTagName(span) => {
                 writeln!(f, "error:{}:{}: invalid tag", span.row, span.col_start)?;
+                writeln!(f, "{span}")
+            }
+            ParseError::InvalidXmlChar(c, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: invalid XML character encountered {:?}",
+                    span.row, span.col_start, c
+                )?;
                 writeln!(f, "{span}")
             }
             ParseError::InvalidXmlPrefixUri(span) => {
@@ -597,6 +582,20 @@ impl<'a> TokenStream<'a> {
         Ok(matches!(current, 0x20 | 0x9 | 0xD | 0xA))
     }
 
+    fn expect_and_consume_whitespace(&mut self) -> ParseResult<()> {
+        if !self.is_white_space()? {
+            return Err(ParseError::UnexpectedCharacter2(
+                "whitespace",
+                self.unchecked_current_byte(),
+                self.span_single(),
+            ));
+        }
+
+        self.consume_whitespace();
+
+        Ok(())
+    }
+
     fn consume_eq(&mut self) -> ParseResult<()> {
         let current = self.current_byte()?;
         if current != b'=' {
@@ -611,7 +610,7 @@ impl<'a> TokenStream<'a> {
     fn consume_whitespace(&mut self) {
         while !self.is_at_end() {
             // We know we aren't at the end so this will not panic
-            if !self.is_white_space().unwrap() {
+            if !self.is_white_space().expect("unexpected EOF") {
                 break;
             }
 
@@ -758,15 +757,12 @@ impl<'a> TokenStream<'a> {
         }
 
         self.advance(2);
+        let target_start = self.pos;
+
         if self.is_white_space()? {
-            return Err(ParseError::UnexpectedCharacter2(
-                "a space",
-                self.unchecked_current_byte(),
-                self.span_single(),
-            ));
+            return Err(ParseError::InvalidTagName(self.span(target_start, target_start + 1)));
         }
 
-        let target_start = self.pos;
         loop {
             if self.is_at_end() {
                 return Err(ParseError::UnexpectedEndOfStream);
@@ -782,9 +778,7 @@ impl<'a> TokenStream<'a> {
         // We already know the target != [(('X' | 'x') ('M' | 'm') ('L' | 'l'))]
         // so we only need to ensure it is a valid 'Name'
         let target = self.slice(target_start, self.pos);
-        if !validate::is_valid_name(target) {
-            return Err(ParseError::InvalidTagName(self.span(target_start, self.pos)));
-        }
+        validate::is_valid_name(target, target_start, self)?;
 
         if let Ok(b'?') = self.current_byte() {
             let peek = self.peek_byte()?;
@@ -819,10 +813,7 @@ impl<'a> TokenStream<'a> {
         }
 
         let data = self.slice(data_start, self.pos);
-        if let Err((offset, c)) = validate::is_xml_chars(data) {
-            let start = data_start + offset;
-            return Err(ParseError::InvalidPIData(c, self.span(start, start + 1)));
-        }
+        validate::is_xml_chars(data, data_start, self)?;
 
         self.advance(2);
         self.emit_token(Token::ProcessingInstruction {
@@ -1051,13 +1042,10 @@ impl<'a> TokenStream<'a> {
 
         let end = self.pos;
         let data = &self.source[start..end];
+
+        validate::is_xml_chars(data, start, self)?;
+
         self.advance(3);
-
-        if let Err((offset, c)) = validate::is_xml_chars(data) {
-            let start = start + offset;
-            return Err(ParseError::InvalidCData(c, self.span(start, start + 1)));
-        }
-
         self.emit_token(Token::CData { data })?;
 
         Ok(())
@@ -1117,17 +1105,8 @@ impl<'a> TokenStream<'a> {
 
         self.advance(3);
         let comment = self.slice(start, self.pos);
-        if let Err((offset, c)) = validate::is_xml_chars(comment) {
-            let start = start + offset;
-            return Err(ParseError::InvalidComment(
-                format!("invalid character {:?}", c),
-                self.span(start, start + 1),
-            ));
-        }
-
-        self.emit_token(Token::Comment {
-            comment: self.slice(start, self.pos),
-        })?;
+        validate::is_xml_chars(comment, start, self)?;
+        self.emit_token(Token::Comment { comment })?;
 
         Ok(())
     }
@@ -1502,7 +1481,7 @@ mod test {
     fn test_parse_pi_invalid_target_leading_whitespace() {
         let mut stream = stream_from(r#"<? target world?>"#);
         let res = stream.parse_processing_instruction();
-        assert!(matches!(res, Err(ParseError::UnexpectedCharacter2(_, _, _))));
+        assert!(matches!(res, Err(ParseError::InvalidTagName(_))));
     }
 
     #[test]
@@ -1516,7 +1495,7 @@ mod test {
     fn test_parse_pi_invalid_name() {
         let mut stream = stream_from("<?L\u{FFFE}L hehe?>");
         let res = stream.parse_processing_instruction();
-        assert!(matches!(res, Err(ParseError::InvalidTagName(_))));
+        assert!(matches!(res, Err(ParseError::InvalidXmlChar(_, _))));
     }
 
     #[test]
@@ -1537,7 +1516,7 @@ mod test {
     fn test_parse_pi_invalid_data() {
         let mut stream = stream_from("<?target dat\u{FFFF}a?>");
         let res = stream.parse_processing_instruction();
-        assert!(matches!(res, Err(ParseError::InvalidPIData(_, _))));
+        assert!(matches!(res, Err(ParseError::InvalidXmlChar(_, _))));
     }
 
     // ========== Namespace/QName ==========
