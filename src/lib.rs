@@ -24,6 +24,11 @@ pub enum ParseError {
     /// Processing Instruction data does not contain valid XML characters
     InvalidPIData(char, Span),
 
+    /// Invalid CData
+    ///
+    /// CData does not contain valid XML characters
+    InvalidCData(char, Span),
+
     /// Invalid Standalone
     ///
     /// Valid values [yes | no]
@@ -128,6 +133,14 @@ impl std::fmt::Display for ParseError {
                 writeln!(
                     f,
                     "error:{}:{}: PI contained invalid character {:?}",
+                    span.row, span.col_start, c
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::InvalidCData(c, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: CData contains invalid character {:?}",
                     span.row, span.col_start, c
                 )?;
                 writeln!(f, "{span}")
@@ -393,6 +406,7 @@ pub enum NodeKind<'a> {
     },
     Text(&'a str),
     Comment(&'a str),
+    CData(&'a str),
 }
 
 pub struct Parser;
@@ -490,6 +504,11 @@ pub enum Token<'a> {
     /// <!-- comment goes here -->
     /// ```
     Comment { comment: &'a str },
+
+    /// ```xml
+    /// <![CDATA[ Data that can <data>markup</data> ]]>
+    /// ```
+    CData { data: &'a str },
 }
 
 pub struct TokenStream<'a> {
@@ -976,6 +995,7 @@ impl<'a> TokenStream<'a> {
         while !self.is_at_end() {
             match self.unchecked_current_byte() {
                 b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
+                b'<' if self.starts_with("<![CDATA[") => self.parse_cdata()?,
                 b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
                 b'<' if self.starts_with("</") => {
                     self.parse_element_end()?;
@@ -991,6 +1011,40 @@ impl<'a> TokenStream<'a> {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    // CDSect   ::=  CDStart CData CDEnd
+    // CDStart  ::=  '<![CDATA['
+    // CData    ::=  (Char* - (Char* ']]>' Char*))
+    // CDEnd    ::=  ']]>'
+    fn parse_cdata(&mut self) -> ParseResult<()> {
+        self.advance(9);
+        let start = self.pos;
+
+        loop {
+            if self.is_at_end() {
+                return Err(ParseError::UnexpectedEndOfStream);
+            }
+
+            if self.unchecked_current_byte() == b']' && self.peek_seq("]]>") {
+                break;
+            }
+
+            self.advance(1);
+        }
+
+        let end = self.pos;
+        let data = &self.source[start..end];
+        self.advance(3);
+
+        if let Err((offset, c)) = validate::is_xml_chars(data) {
+            let start = start + offset;
+            return Err(ParseError::InvalidCData(c, self.span(start, start + 1)));
+        }
+
+        self.emit_token(Token::CData { data })?;
 
         Ok(())
     }
@@ -1312,6 +1366,21 @@ impl<'a> TokenStream<'a> {
                     id: self.current_node_id,
                     parent_id: None,
                     data: NodeKind::Comment(comment),
+                };
+                self.current_node_id += 1;
+                match self.temp_elements.last_mut() {
+                    Some(parent) => {
+                        node.parent_id = Some(parent.id);
+                        parent.children.push(node);
+                    }
+                    None => self.doc.nodes.push(node),
+                }
+            }
+            Token::CData { data } => {
+                let mut node = Node {
+                    id: self.current_node_id,
+                    parent_id: None,
+                    data: NodeKind::CData(data),
                 };
                 self.current_node_id += 1;
                 match self.temp_elements.last_mut() {
