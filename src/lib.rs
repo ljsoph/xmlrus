@@ -29,6 +29,12 @@ pub enum ParseError {
     /// CData does not contain valid XML characters
     InvalidCData(char, Span),
 
+    /// Invalid Character Data
+    ///
+    /// Unescaped ampersands (`&`) and left angle brackets (`<`) will be parsed as separate errors.
+    /// This error represents a [`CharData`] that contains the CDATA-section-close delimiter `]]>`
+    InvalidCharData(Span),
+
     /// Invalid Standalone
     ///
     /// Valid values [yes | no]
@@ -117,6 +123,22 @@ impl std::fmt::Display for ParseError {
                 )?;
                 writeln!(f, "{span}")
             }
+            ParseError::InvalidCData(c, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: CDATA contains invalid character {:?}",
+                    span.row, span.col_start, c
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::InvalidCharData(span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: sequence ']]>' is not allowed inside character data",
+                    span.row, span.col_start
+                )?;
+                writeln!(f, "{span}")
+            }
             ParseError::InvalidComment(reason, span) => {
                 writeln!(f, "error:{}:{}: invalid comment: {}", span.row, span.col_start, reason)?;
                 writeln!(f, "{span}")
@@ -133,14 +155,6 @@ impl std::fmt::Display for ParseError {
                 writeln!(
                     f,
                     "error:{}:{}: PI contained invalid character {:?}",
-                    span.row, span.col_start, c
-                )?;
-                writeln!(f, "{span}")
-            }
-            ParseError::InvalidCData(c, span) => {
-                writeln!(
-                    f,
-                    "error:{}:{}: CData contains invalid character {:?}",
                     span.row, span.col_start, c
                 )?;
                 writeln!(f, "{span}")
@@ -1060,9 +1074,13 @@ impl<'a> TokenStream<'a> {
             }
         }
 
-        self.emit_token(Token::Text {
-            text: self.slice(start, self.pos),
-        })?;
+        let text = self.slice(start, self.pos);
+        if text.contains("]]>") {
+            let pos = text.find("]]>").expect("text to contain ]]>");
+            let start = start + pos;
+            return Err(ParseError::InvalidCharData(self.span(start, start + 3)));
+        }
+        self.emit_token(Token::Text { text })?;
 
         Ok(())
     }
