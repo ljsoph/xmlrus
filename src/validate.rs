@@ -81,6 +81,12 @@ pub fn is_xml_char(value: char) -> bool {
 }
 
 /// Validate a String contains only characters in the XML Character Range
-pub fn is_xml_chars(seq: &str) -> bool {
-    seq.chars().all(is_xml_char)
+pub fn is_xml_chars(seq: &str) -> Result<(), (usize, char)> {
+    for (index, value) in seq.char_indices() {
+        if !is_xml_char(value) {
+            return Err((index, value));
+        }
+    }
+
+    Ok(())
 }

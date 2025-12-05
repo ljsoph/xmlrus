@@ -22,7 +22,7 @@ pub enum ParseError {
     /// Invalid Processing Instruction Data
     ///
     /// Processing Instruction data does not contain valid XML characters
-    InvalidPIData(Span),
+    InvalidPIData(char, Span),
 
     /// Invalid Standalone
     ///
@@ -124,8 +124,12 @@ impl std::fmt::Display for ParseError {
                 )?;
                 writeln!(f, "{span}")
             }
-            ParseError::InvalidPIData(span) => {
-                writeln!(f, "error:{}:{}: invalid PI data", span.row, span.col_start)?;
+            ParseError::InvalidPIData(c, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: PI contained invalid character {:?}",
+                    span.row, span.col_start, c
+                )?;
                 writeln!(f, "{span}")
             }
             ParseError::InvalidStandalone(actual, span) => {
@@ -782,8 +786,9 @@ impl<'a> TokenStream<'a> {
         }
 
         let data = self.slice(data_start, self.pos);
-        if !validate::is_xml_chars(data) {
-            return Err(ParseError::InvalidPIData(self.span_single()));
+        if let Err((offset, c)) = validate::is_xml_chars(data) {
+            let start = data_start + offset;
+            return Err(ParseError::InvalidPIData(c, self.span(start, start + 1)));
         }
 
         self.advance(2);
@@ -1436,7 +1441,7 @@ mod test {
     fn test_parse_pi_invalid_data() {
         let mut stream = stream_from("<?target dat\u{FFFF}a?>");
         let res = stream.parse_processing_instruction();
-        assert!(matches!(res, Err(ParseError::InvalidPIData(_))));
+        assert!(matches!(res, Err(ParseError::InvalidPIData(_, _))));
     }
 
     // ========== Namespace/QName ==========
