@@ -1082,7 +1082,7 @@ impl<'a> TokenStream<'a> {
             }
 
             // For compatibility, the string "--" (double-hyphen) must not occur within comments.
-            if self.starts_with("--") {
+            if self.unchecked_current_byte() == b'-' && self.peek_seq("--") {
                 if self.peek_seq("-->") {
                     break;
                 }
@@ -1098,6 +1098,15 @@ impl<'a> TokenStream<'a> {
         }
 
         self.advance(3);
+        let comment = self.slice(start, self.pos);
+        if let Err((offset, c)) = validate::is_xml_chars(comment) {
+            let start = start + offset;
+            return Err(ParseError::InvalidComment(
+                format!("invalid character {:?}", c),
+                self.span(start, start + 1),
+            ));
+        }
+
         self.emit_token(Token::Comment {
             comment: self.slice(start, self.pos),
         })?;
