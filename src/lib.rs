@@ -25,6 +25,13 @@ pub enum ParseError {
     /// Missing `version` or unclosed declaration
     InvalidDeclaration(String, Span),
 
+    /// Invalid Root Name
+    ///
+    /// If a `DTD` is present, the root element name must match the `DOCTYPE`.
+    ///
+    /// Expected, actual, span
+    InvalidRootName(String, String, Span),
+
     /// Invalid Standalone
     ///
     /// Valid values [yes | no]
@@ -136,6 +143,14 @@ impl std::fmt::Display for ParseError {
                 )?;
                 writeln!(f, "{span}")
             }
+            ParseError::InvalidRootName(expected, actual, span) => {
+                writeln!(
+                    f,
+                    "error{}:{}: Document root element \"{actual}\" must match DOCTYPE \"{expected}\"",
+                    span.row, span.col_start
+                )?;
+                writeln!(f, "{span}")
+            }
             ParseError::InvalidStandalone(actual, span) => {
                 writeln!(f, "error{}:{}: invalid standalone value", span.row, span.col_start)?;
                 writeln!(f, "  Expected: [yes | no]\n  Actual:   [{actual}]")?;
@@ -225,7 +240,7 @@ impl std::fmt::Display for ParseError {
                 writeln!(
                     f,
                     "error:{}:{}: unknown namespace prefix `{}`",
-                    prefix, span.row, span.col_start
+                    span.row, span.col_start, prefix,
                 )?;
                 writeln!(f, "{span}")
             }
@@ -294,6 +309,8 @@ impl Span {
 
 #[derive(Debug, Default)]
 pub struct Document<'a> {
+    pub name: Option<&'a str>,
+    pub root_node_id: Option<usize>,
     pub nodes: Vec<Node<'a>>,
     pub namespaces: Vec<Namespace<'a>>,
 }
@@ -418,6 +435,8 @@ pub struct Parser;
 impl Parser {
     pub fn parse(source: &str) -> ParseResult<Document<'_>> {
         let doc = Document {
+            name: None,
+            root_node_id: None,
             nodes: Vec::new(),
             namespaces: Vec::new(),
         };
@@ -435,6 +454,12 @@ impl Parser {
 
         Ok(stream.doc)
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum ElementType {
+    Root,
+    Child,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -730,7 +755,7 @@ impl<'a> TokenStream<'a> {
             return Err(ParseError::MissingRoot);
         }
 
-        self.parse_element()?;
+        self.parse_element(ElementType::Root)?;
 
         if !self.temp_elements.is_empty() {
             return Err(ParseError::UnclosedRoot);
@@ -936,6 +961,7 @@ impl<'a> TokenStream<'a> {
         self.expect_and_consume_whitespace()?;
 
         let name = self.consume_name()?;
+        self.doc.name = Some(name);
 
         // TODO: ExternalId
 
@@ -1014,13 +1040,26 @@ impl<'a> TokenStream<'a> {
         self.advance(1);
         let value = self.slice(start, self.pos);
 
-        println!("Parsed Entity {{ name: \"{_name}\", value: \"{value}\" }}");
-
         Ok(value)
     }
 
-    fn parse_element(&mut self) -> ParseResult<()> {
+    fn parse_element(&mut self, kind: ElementType) -> ParseResult<()> {
+        let start = self.pos;
         let element_start = self.parse_element_start()?;
+
+        if let Some(doc_name) = self.doc.name
+            && let ElementType::Root = kind
+            && let Token::ElementStart { local, .. } = element_start
+        {
+            if doc_name != local {
+                return Err(ParseError::InvalidRootName(
+                    doc_name.to_string(),
+                    local.to_string(),
+                    self.span(start + 1, self.pos),
+                ));
+            }
+        }
+
         self.emit_token(element_start)?;
 
         let mut is_open = false;
@@ -1201,7 +1240,7 @@ impl<'a> TokenStream<'a> {
                     self.parse_element_end()?;
                     break;
                 }
-                b'<' => self.parse_element()?,
+                b'<' => self.parse_element(ElementType::Child)?,
                 _ => {
                     if self.is_white_space()? {
                         self.advance(1);
@@ -1372,9 +1411,12 @@ impl<'a> TokenStream<'a> {
                 ElementEndKind::Close { prefix, local } => {
                     if let Some(start) = self.temp_elements.pop() {
                         if start.prefix != prefix || start.local != local {
-                            let expected = format!("{}:{}", start.prefix, start.local);
-                            let actual = format!("{prefix}:{local}");
-                            let start = self.pos - actual.len();
+                            let (expected, actual) = if start.prefix.is_empty() {
+                                (start.local.to_string(), local.to_string())
+                            } else {
+                                (format!("{}:{}", start.prefix, start.local), format!("{prefix}:{local}"))
+                            };
+                            let start = self.pos - actual.len() - 1;
                             let span = self.span(start, self.pos - 1);
                             return Err(ParseError::TagNameMismatch(expected, actual, span));
                         }
@@ -1404,6 +1446,7 @@ impl<'a> TokenStream<'a> {
                         }
                         // root node
                         else {
+                            self.doc.root_node_id = Some(node.id);
                             self.doc.nodes.push(node);
                         }
                     }
@@ -1556,6 +1599,8 @@ mod test {
             pos: 0,
             len: source.len(),
             doc: Document {
+                name: None,
+                root_node_id: None,
                 nodes: Vec::new(),
                 namespaces: Vec::new(),
             },
@@ -1571,6 +1616,8 @@ mod test {
             pos: 0,
             len: source.len(),
             doc: Document {
+                name: None,
+                root_node_id: None,
                 nodes: Vec::new(),
                 namespaces: Vec::new(),
             },
@@ -1830,7 +1877,7 @@ mod test {
     #[test]
     fn test_parse_element_namespace_declaration() {
         let mut stream = stream_from(r#"<tag xmlns:foo="http://www.google.com"/>"#);
-        stream.parse_element().unwrap();
+        stream.parse_element(ElementType::Child).unwrap();
 
         assert_eq!(
             NodeKind::Element {
@@ -1851,7 +1898,7 @@ mod test {
     #[test]
     fn test_parse_element_default_namespace_declaration() {
         let mut stream = stream_from(r#"<tag xmlns="http://www.google.com"/>"#);
-        stream.parse_element().unwrap();
+        stream.parse_element(ElementType::Child).unwrap();
 
         assert_eq!(
             NodeKind::Element {
@@ -1872,7 +1919,7 @@ mod test {
     #[test]
     fn test_parse_element_with_attributes() {
         let mut stream = stream_from(r#"<tag some="value" another="one"></tag>"#);
-        stream.parse_element().unwrap();
+        stream.parse_element(ElementType::Child).unwrap();
 
         assert_eq!(
             NodeKind::Element {
@@ -1897,7 +1944,7 @@ mod test {
     #[test]
     fn test_parse_element_empty_with_attributes() {
         let mut stream = stream_from(r#"<name some="value" another="one"/>"#);
-        stream.parse_element().unwrap();
+        stream.parse_element(ElementType::Child).unwrap();
 
         assert_eq!(
             NodeKind::Element {
