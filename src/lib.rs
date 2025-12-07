@@ -408,6 +408,11 @@ pub enum NodeKind<'a> {
     CData(&'a str),
 }
 
+struct Entity<'a> {
+    name: &'a str,
+    value: &'a str,
+}
+
 pub struct Parser;
 
 impl Parser {
@@ -423,9 +428,10 @@ impl Parser {
             len: source.len(),
             pos: 0,
             temp_elements: Vec::new(),
+            entities: Vec::new(),
             current_node_id: 0,
         };
-        stream.parse()?;
+        stream.parse_document()?;
 
         Ok(stream.doc)
     }
@@ -516,6 +522,7 @@ pub struct TokenStream<'a> {
     len: usize,
     doc: Document<'a>,
     temp_elements: Vec<TempElementData<'a>>,
+    entities: Vec<Entity<'a>>,
     current_node_id: usize,
 }
 
@@ -618,6 +625,27 @@ impl<'a> TokenStream<'a> {
         }
     }
 
+    fn consume_name(&mut self) -> ParseResult<&'a str> {
+        let start = self.pos;
+
+        loop {
+            if self.is_at_end() {
+                return Err(ParseError::UnexpectedEndOfStream);
+            }
+
+            if self.is_white_space()? {
+                break;
+            }
+
+            self.advance(1);
+        }
+
+        let name = self.slice(start, self.pos);
+        validate::is_valid_name(name, start, self)?;
+
+        Ok(name)
+    }
+
     fn consume_quote(&mut self) -> ParseResult<u8> {
         let current = self.current_byte()?;
         if current == b'\'' || current == b'"' {
@@ -675,6 +703,81 @@ impl<'a> TokenStream<'a> {
         false
     }
 
+    /// Parses the source input, emitting a stream of tokens to build up the
+    /// resulting `Document`
+    ///
+    /// Document  ::=  prolog element Misc*
+    fn parse_document(&mut self) -> ParseResult<()> {
+        self.parse_prolog()?;
+
+        // Parse any comments, PIs, or whitespace before the root element
+        while !self.is_at_end() {
+            match self.unchecked_current_byte() {
+                b' ' | b'\t' | b'\n' | b'\r' => {
+                    self.advance(1);
+                }
+                b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
+                b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
+                // Start of the root node, break and parse outside of the loop.
+                b'<' => break,
+                _ => return Err(ParseError::WTF(self.span_single())),
+            }
+        }
+
+        self.consume_whitespace();
+
+        if self.is_at_end() {
+            return Err(ParseError::MissingRoot);
+        }
+
+        self.parse_element()?;
+
+        if !self.temp_elements.is_empty() {
+            return Err(ParseError::UnclosedRoot);
+        }
+
+        // Parse any comments or PIs after the root node
+        self.parse_misc()?;
+
+        if !self.is_at_end() {
+            return Err(ParseError::UnexpectedElement(self.span(self.pos, self.pos + 1)));
+        }
+
+        Ok(())
+    }
+
+    // prolog  ::=  XMLDecl? Misc* (doctypedecl Misc*)?
+    fn parse_prolog(&mut self) -> ParseResult<()> {
+        // There can only be one XML declaration, and it must be at the absolute start
+        // of the Document, i.e., no characters are allowed before it (including whitespace)
+        if self.starts_with("<?xml ") {
+            self.parse_xml_decl()?;
+        }
+
+        self.parse_misc()?;
+
+        if self.peek_seq("<!DOCTYPE") {
+            self.parse_doc_type_decl()?;
+            self.parse_misc()?;
+        }
+
+        Ok(())
+    }
+
+    // Misc  ::=  Comment | PI | S
+    fn parse_misc(&mut self) -> ParseResult<()> {
+        while !self.is_at_end() {
+            match self.unchecked_current_byte() {
+                b' ' | b'\t' | b'\n' | b'\r' => self.advance(1),
+                b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
+                b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
+                _ => break,
+            }
+        }
+
+        Ok(())
+    }
+
     // XMLDecl       ::=   '<?xml' VersionInfo EncodingDecl? SDDecl? S? '?>'
     // VersionInfo   ::=   S 'version' Eq ("'" VersionNum "'" | '"' VersionNum '"')
     // Eq            ::=   S? '=' S?
@@ -682,7 +785,7 @@ impl<'a> TokenStream<'a> {
     // EncodingDecl  ::=   S 'encoding' Eq ('"' EncName '"' | "'" EncName "'" )
     // EncName       ::=   [A-Za-z] ([A-Za-z0-9._] | '-')* /* Encoding name contains only Latin characters */
     // SDDecl        ::=   S 'standalone' Eq (("'" ('yes' | 'no') "'") | ('"' ('yes' | 'no') '"')) [VC: Standalone Document Declaration]
-    fn parse_declaration(&mut self) -> ParseResult<()> {
+    fn parse_xml_decl(&mut self) -> ParseResult<()> {
         self.advance(5);
         self.consume_whitespace();
 
@@ -822,6 +925,98 @@ impl<'a> TokenStream<'a> {
         })?;
 
         Ok(())
+    }
+
+    // doctypedecl ::=   '<!DOCTYPE' S Name (S ExternalID)? S? ('[' intSubset ']' S?)? '>'
+    // DeclSep     ::=   PEReference | S [WFC: PE Between Declarations]
+    // intSubset   ::=   (markupdecl | DeclSep)*
+    // markupdecl  ::=   elementdecl | AttlistDecl | EntityDecl | NotationDecl | PI | Comment
+    fn parse_doc_type_decl(&mut self) -> ParseResult<()> {
+        self.advance(9);
+        self.expect_and_consume_whitespace()?;
+
+        let name = self.consume_name()?;
+
+        // TODO: ExternalId
+
+        self.consume_whitespace();
+        self.consume_byte(b'[')?;
+
+        // Parse 'intSubset'
+        loop {
+            // TODO:
+            // - elementdecl
+            // - AttlistDecl
+            // - NotationDecl
+            match self.current_byte()? {
+                b']' => break,
+                b'<' if self.starts_with("<!ENTITY") => self.parse_entity_declaration()?,
+                b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
+                b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
+                _ if self.is_white_space()? => self.advance(1),
+                _ => todo!(),
+            }
+        }
+
+        self.advance(1);
+        self.consume_whitespace();
+        self.consume_byte(b'>')?;
+
+        Ok(())
+    }
+
+    // EntityDecl  ::=  GEDecl | PEDecl
+    // GEDecl      ::=  '<!ENTITY' S Name S EntityDef S? '>'
+    // PEDecl      ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
+    // EntityDef   ::=  EntityValue | (ExternalID NDataDecl?)
+    // PEDef       ::=  EntityValue | ExternalID
+    fn parse_entity_declaration(&mut self) -> ParseResult<()> {
+        self.advance(8);
+        self.expect_and_consume_whitespace()?;
+
+        let start = self.pos;
+        let name = self.consume_name()?;
+        validate::is_valid_name(name, start, self)?;
+
+        self.expect_and_consume_whitespace()?;
+
+        let value = match self.current_byte()? {
+            b if matches!(b, b'\'' | b'"') => self.parse_entity_value(name)?,
+            b => return Err(ParseError::UnexpectedCharacter2("`'` or `\"`", b, self.span_single())),
+        };
+
+        self.consume_byte(b'>')?;
+
+        // If the same entity is declared more than once, the first declaration encountered is binding
+        if self.entities.iter().any(|entity| entity.name == name) {
+            return Ok(());
+        }
+
+        self.entities.push(Entity { name, value });
+
+        Ok(())
+    }
+
+    // EntityValue  ::=  '"' ([^%&"] | PEReference | Reference)* '"' |  "'" ([^%&'] | PEReference | Reference)* "'"
+    fn parse_entity_value(&mut self, _name: &'a str) -> ParseResult<&'a str> {
+        let delimiter = self.consume_quote()?;
+        let start = self.pos;
+
+        // TODO: Parse references and recursion detection
+        //  - A parsed entity MUST NOT contain a recursive reference to itself, either directly or indirectly.
+        loop {
+            match self.current_byte()? {
+                d if d == delimiter => break,
+                _ => self.advance(1),
+            }
+        }
+
+        self.advance(1);
+        let value = self.slice(start, self.pos);
+
+        println!("Parsed Entity {{ name: \"{_name}\", value: \"{value}\" }}");
+
+        Ok(value)
     }
 
     fn parse_element(&mut self) -> ParseResult<()> {
@@ -1111,58 +1306,6 @@ impl<'a> TokenStream<'a> {
         Ok(())
     }
 
-    /// Parses the source input, emitting a stream of tokens to build up the
-    /// resulting `Document`
-    ///
-    /// Document  ::=  prolog element Misc*
-    fn parse(&mut self) -> ParseResult<()> {
-        // There can only be one XML declaration, and it must be at the absolute start
-        // of the Document, i.e., no characters are allowed before it (including whitespace)
-        if self.starts_with("<?xml ") {
-            self.parse_declaration()?;
-        }
-
-        // Parse any comments or PIs before the root element
-        while !self.is_at_end() {
-            match self.unchecked_current_byte() {
-                b' ' | b'\t' | b'\n' | b'\r' => {
-                    self.advance(1);
-                }
-                b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
-                b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
-                // Start of the root node, break and parse outside of the loop.
-                b'<' => break,
-                _ => return Err(ParseError::WTF(self.span_single())),
-            }
-        }
-
-        self.consume_whitespace();
-
-        if self.is_at_end() {
-            return Err(ParseError::MissingRoot);
-        }
-
-        self.parse_element()?;
-
-        if !self.temp_elements.is_empty() {
-            return Err(ParseError::UnclosedRoot);
-        }
-
-        // Parse any comments or PIs after the root node
-        while !self.is_at_end() {
-            match self.unchecked_current_byte() {
-                b' ' | b'\t' | b'\n' | b'\r' => {
-                    self.advance(1);
-                }
-                b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
-                b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
-                _ => return Err(ParseError::UnexpectedElement(self.span(self.pos, self.pos + 1))),
-            }
-        }
-
-        Ok(())
-    }
-
     fn emit_token(&mut self, token: Token<'a>) -> ParseResult<()> {
         match token {
             Token::ElementStart { prefix, local } => {
@@ -1417,6 +1560,7 @@ mod test {
                 namespaces: Vec::new(),
             },
             temp_elements: Vec::new(),
+            entities: Vec::new(),
             current_node_id: 0,
         }
     }
@@ -1439,6 +1583,7 @@ mod test {
                 id: 0,
                 parent_id: None,
             }],
+            entities: Vec::new(),
             current_node_id: 0,
         }
     }
