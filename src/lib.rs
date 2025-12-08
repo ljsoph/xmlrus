@@ -12,6 +12,11 @@ pub enum ParseError {
     /// Duplicate Attribute
     DuplicateAttribute(String, Span),
 
+    /// Duplicate Element Type declaration
+    ///
+    /// An element type MUST NOT be declared more than once.
+    DuplicateElementTypeDecl(String, Span),
+
     /// Invalid Character Data
     ///
     /// Unescaped ampersands (`&`) and left angle brackets (`<`) will be parsed as separate errors.
@@ -22,8 +27,14 @@ pub enum ParseError {
     InvalidComment(String, Span),
 
     /// Invalid Declaration
+    ///
     /// Missing `version` or unclosed declaration
     InvalidDeclaration(String, Span),
+
+    /// Invalid Element Type declaration
+    ///
+    /// Well formed Element Type declarations must contain a valid name and [`Content Spec`]
+    InvalidElementTypeDecl(Span),
 
     /// Invalid Namespace character
     InvalidNamespaceChar(char, Span),
@@ -126,6 +137,14 @@ impl std::fmt::Display for ParseError {
                 )?;
                 writeln!(f, "{span}")
             }
+            ParseError::DuplicateElementTypeDecl(element, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: duplicate element type declaration '{}'",
+                    span.row, span.col_start, element
+                )?;
+                writeln!(f, "{span}")
+            }
             ParseError::InvalidCharData(span) => {
                 writeln!(
                     f,
@@ -143,6 +162,14 @@ impl std::fmt::Display for ParseError {
                     f,
                     "error:{}:{}: invalid declaration: expected [{}]",
                     span.row, span.col_start, expected
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::InvalidElementTypeDecl(span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: malformed element type declaration",
+                    span.row, span.col_start
                 )?;
                 writeln!(f, "{span}")
             }
@@ -436,9 +463,21 @@ pub enum NodeKind<'a> {
     CData(&'a str),
 }
 
-struct Entity<'a> {
+struct EntityDecl<'a> {
     name: &'a str,
     value: &'a str,
+}
+
+struct ElementTypeDecl<'a> {
+    name: &'a str,
+    content_spec: ContentSpec<'a>,
+}
+
+enum ContentSpec<'a> {
+    Empty,
+    Any,
+    Mixed(Vec<&'a str>),
+    Children(Vec<&'a str>),
 }
 
 pub struct Parser;
@@ -459,6 +498,7 @@ impl Parser {
             pos: 0,
             temp_elements: Vec::new(),
             entities: Vec::new(),
+            element_types: Vec::new(),
             current_node_id: 0,
         };
         stream.parse_document()?;
@@ -558,7 +598,8 @@ pub struct TokenStream<'a> {
     len: usize,
     doc: Document<'a>,
     temp_elements: Vec<TempElementData<'a>>,
-    entities: Vec<Entity<'a>>,
+    entities: Vec<EntityDecl<'a>>,
+    element_types: Vec<ElementTypeDecl<'a>>,
     current_node_id: usize,
 }
 
@@ -665,12 +706,10 @@ impl<'a> TokenStream<'a> {
         let start = self.pos;
 
         loop {
-            if self.is_at_end() {
-                return Err(ParseError::UnexpectedEndOfStream);
-            }
-
-            if self.is_white_space()? {
-                break;
+            match self.current_byte()? {
+                b'>' => break,
+                _ if self.is_white_space()? => break,
+                _ => self.advance(1),
             }
 
             self.advance(1);
@@ -977,25 +1016,82 @@ impl<'a> TokenStream<'a> {
         // TODO: ExternalId
 
         self.consume_whitespace();
-        self.consume_byte(b'[')?;
 
-        // Parse 'intSubset'
-        loop {
-            // TODO:
-            // - elementdecl
-            // - AttlistDecl
-            // - NotationDecl
-            match self.current_byte()? {
-                b']' => break,
-                b'<' if self.starts_with("<!ENTITY") => self.parse_entity_declaration()?,
-                b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
-                b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
-                _ if self.is_white_space()? => self.advance(1),
-                _ => todo!(),
+        if let Ok(b'[') = self.current_byte() {
+            self.consume_byte(b'[')?;
+
+            // Parse 'intSubset'
+            loop {
+                // TODO:
+                // - elementdecl
+                // - AttlistDecl
+                // - NotationDecl
+                match self.current_byte()? {
+                    b']' => break,
+                    b'<' if self.starts_with("<!ELEMENT") => self.parse_element_type_decl()?,
+                    b'<' if self.starts_with("<!ENTITY") => self.parse_entity_decl()?,
+                    b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
+                    b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
+                    _ if self.is_white_space()? => self.advance(1),
+                    _ => todo!(),
+                }
             }
+
+            self.consume_byte(b']')?;
+            self.consume_whitespace();
         }
 
-        self.advance(1);
+        self.consume_byte(b'>')?;
+
+        Ok(())
+    }
+
+    // elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
+    // contentspec  ::=  'EMPTY' | 'ANY' | Mixed | children
+    // children     ::=  (choice | seq) ('?' | '*' | '+')?
+    // cp           ::=  (Name | choice | seq) ('?' | '*' | '+')?
+    // choice       ::=  '(' S? cp ( S? '|' S? cp )+ S? ')'         TODO: [VC: Proper Group/PE Nesting]
+    // seq          ::=  '(' S? cp ( S? ',' S? cp )* S? ')'         TODO: [VC: Proper Group/PE Nesting]
+    fn parse_element_type_decl(&mut self) -> ParseResult<()> {
+        self.advance(9);
+
+        let start = self.pos;
+        self.expect_and_consume_whitespace()?;
+        let name = self.consume_name()?;
+
+        validate::is_valid_name(name, start, self)?;
+
+        if let Err(_) = self.expect_and_consume_whitespace() {
+            return Err(ParseError::InvalidElementTypeDecl(self.span(start + 1, self.pos)));
+        }
+
+        // An element type MUST NOT be declared more than once.
+        if self.element_types.iter().any(|el| el.name == name) {
+            return Err(ParseError::DuplicateElementTypeDecl(
+                name.to_string(),
+                self.span(start, self.pos - 1),
+            ));
+        }
+
+        if self.peek_seq("EMPTY") {
+            self.element_types.push(ElementTypeDecl {
+                name,
+                content_spec: ContentSpec::Empty,
+            });
+            self.advance(5);
+        } else if self.peek_seq("ANY") {
+            self.element_types.push(ElementTypeDecl {
+                name,
+                content_spec: ContentSpec::Any,
+            });
+            self.advance(3);
+        } else if self.peek_seq("(") {
+            // TODO: Parse 'Mixed' & 'children' content specs
+            self.consume_byte(b'(')?;
+        } else {
+            return Err(ParseError::InvalidElementTypeDecl(self.span(start, self.pos)));
+        }
+
         self.consume_whitespace();
         self.consume_byte(b'>')?;
 
@@ -1007,14 +1103,14 @@ impl<'a> TokenStream<'a> {
     // PEDecl      ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
     // EntityDef   ::=  EntityValue | (ExternalID NDataDecl?)
     // PEDef       ::=  EntityValue | ExternalID
-    fn parse_entity_declaration(&mut self) -> ParseResult<()> {
+    fn parse_entity_decl(&mut self) -> ParseResult<()> {
         self.advance(8);
         self.expect_and_consume_whitespace()?;
 
         let start = self.pos;
         let name = self.consume_name()?;
-        validate::is_valid_name(name, start, self)?;
 
+        validate::is_valid_name(name, start, self)?;
         self.expect_and_consume_whitespace()?;
 
         let value = match self.current_byte()? {
@@ -1024,12 +1120,13 @@ impl<'a> TokenStream<'a> {
 
         self.consume_byte(b'>')?;
 
+        // TODO: Does this need to be an error?
         // If the same entity is declared more than once, the first declaration encountered is binding
         if self.entities.iter().any(|entity| entity.name == name) {
             return Ok(());
         }
 
-        self.entities.push(Entity { name, value });
+        self.entities.push(EntityDecl { name, value });
 
         Ok(())
     }
@@ -1626,6 +1723,7 @@ mod test {
             },
             temp_elements: Vec::new(),
             entities: Vec::new(),
+            element_types: Vec::new(),
             current_node_id: 0,
         }
     }
@@ -1651,6 +1749,7 @@ mod test {
                 parent_id: None,
             }],
             entities: Vec::new(),
+            element_types: Vec::new(),
             current_node_id: 0,
         }
     }
