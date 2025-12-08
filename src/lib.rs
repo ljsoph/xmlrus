@@ -1018,7 +1018,7 @@ impl<'a> TokenStream<'a> {
         self.expect_and_consume_whitespace()?;
 
         let value = match self.current_byte()? {
-            b if matches!(b, b'\'' | b'"') => self.parse_entity_value(name)?,
+            b'\'' | b'"' => self.parse_entity_value(name)?,
             b => return Err(ParseError::UnexpectedCharacter2("`'` or `\"`", b, self.span_single())),
         };
 
@@ -1061,14 +1061,13 @@ impl<'a> TokenStream<'a> {
         if let Some(doc_name) = self.doc.name
             && let ElementType::Root = kind
             && let Token::ElementStart { local, .. } = element_start
+            && doc_name != local
         {
-            if doc_name != local {
-                return Err(ParseError::InvalidRootName(
-                    doc_name.to_string(),
-                    local.to_string(),
-                    self.span(start + 1, self.pos),
-                ));
-            }
+            return Err(ParseError::InvalidRootName(
+                doc_name.to_string(),
+                local.to_string(),
+                self.span(start + 1, self.pos),
+            ));
         }
 
         self.emit_token(element_start)?;
