@@ -25,6 +25,9 @@ pub enum ParseError {
     /// Missing `version` or unclosed declaration
     InvalidDeclaration(String, Span),
 
+    /// Invalid Namespace character
+    InvalidNamespaceChar(char, Span),
+
     /// Invalid Root Name
     ///
     /// If a `DTD` is present, the root element name must match the `DOCTYPE`.
@@ -140,6 +143,14 @@ impl std::fmt::Display for ParseError {
                     f,
                     "error:{}:{}: invalid declaration: expected [{}]",
                     span.row, span.col_start, expected
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::InvalidNamespaceChar(c, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: invalid namespace character encountered {:?}",
+                    span.row, span.col_start, c
                 )?;
                 writeln!(f, "{span}")
             }
@@ -355,7 +366,7 @@ impl<'a> Document<'a> {
 
 #[derive(Debug, PartialEq)]
 struct TempElementData<'a> {
-    prefix: &'a str,
+    prefix: Option<&'a str>,
     local: &'a str,
     namespaces: Vec<Namespace<'a>>,
     children: Vec<Node<'a>>,
@@ -469,7 +480,7 @@ pub enum ElementEndKind<'a> {
     /// `/>`
     Empty,
     /// `</ns:tagname>`
-    Close { prefix: &'a str, local: &'a str },
+    Close { prefix: Option<&'a str>, local: &'a str },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -478,7 +489,7 @@ pub enum Token<'a> {
     /// <ns:name>hello world</ns:name>
     /// ^^^^^^^^
     /// ```
-    ElementStart { prefix: &'a str, local: &'a str },
+    ElementStart { prefix: Option<&'a str>, local: &'a str },
 
     /// ```xml
     /// <!-- ElementEndKind::Close -->
@@ -519,7 +530,7 @@ pub enum Token<'a> {
     ///                  ^^^       value
     /// ```
     Attribute {
-        prefix: &'a str,
+        prefix: Option<&'a str>,
         local: &'a str,
         value: &'a str,
     },
@@ -1117,7 +1128,9 @@ impl<'a> TokenStream<'a> {
 
         let (prefix, local) = self.parse_qname()?;
 
-        if prefix == XMLNS_PREFIX {
+        if let Some(prefix) = prefix
+            && prefix == XMLNS_PREFIX
+        {
             return Err(ParseError::ReservedPrefix(self.span(start, self.pos)));
         }
 
@@ -1179,54 +1192,57 @@ impl<'a> TokenStream<'a> {
     // UnprefixedName  ::=  LocalPart
     // Prefix          ::=  NCName
     // LocalPart       ::=  NCName
-    fn parse_qname(&mut self) -> ParseResult<(&'a str, &'a str)> {
+    // NCName          ::=  Name - (Char* ':' Char*) /* An XML Name, minus the ":" */
+    fn parse_qname(&mut self) -> ParseResult<(Option<&'a str>, &'a str)> {
         let start = self.pos;
 
-        // parse (possible) prefix
         while let Ok(c) = self.current_byte() {
-            // We have not come across a ':' so this is a UnprefixedName
-            if !validate::is_name_char(c as char) {
-                return Ok(("", self.slice(start, self.pos)));
-            }
-
             if c == b':' {
                 break;
+            }
+
+            // We have not come across a ':' so this is an UnprefixedName
+            if !validate::is_name_char(c as char) {
+                let local = self.slice(start, self.pos);
+                if local.is_empty() {
+                    return Err(ParseError::InvalidTagName(self.span_single()));
+                }
+                return Ok((None, local));
             }
 
             self.advance(1);
         }
 
         let prefix = self.slice(start, self.pos);
-
-        if !prefix.is_empty() {
-            // 'xml' prefix will be mapped to 'http://www.w3.org/XML/1998/namespace'
-            if prefix != XML_PREFIX && !self.has_prefix(prefix) {
-                return Err(ParseError::UnknownPrefix(prefix.to_owned(), self.span(start, self.pos)));
-            }
+        if prefix.is_empty() {
+            return Err(ParseError::InvalidTagName(self.span_single()));
         }
 
-        self.advance(1); // consume ':'
-        let local_start = self.pos;
+        // 'xml' prefix will be mapped to 'http://www.w3.org/XML/1998/namespace'
+        if prefix != XML_PREFIX && !self.has_prefix(prefix) {
+            return Err(ParseError::UnknownPrefix(prefix.to_owned(), self.span(start, self.pos)));
+        }
 
+        self.advance(1);
+        let start = self.pos;
         while let Ok(c) = self.current_byte() {
             if !validate::is_name_char(c as char) {
                 break;
             }
 
             if c == b':' {
-                return Err(ParseError::UnexpectedCharacter2(
-                    "non ':' character",
-                    b':',
-                    self.span_single(),
-                ));
+                return Err(ParseError::InvalidNamespaceChar(':', self.span_single()));
             }
 
             self.advance(1);
         }
 
-        let local = self.slice(local_start, self.pos);
+        let local = self.slice(start, self.pos);
+        if local.is_empty() {
+            return Err(ParseError::InvalidTagName(self.span_single()));
+        }
 
-        Ok((prefix, local))
+        Ok((Some(prefix), local))
     }
 
     // content  ::=  CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
@@ -1411,10 +1427,9 @@ impl<'a> TokenStream<'a> {
                 ElementEndKind::Close { prefix, local } => {
                     if let Some(start) = self.temp_elements.pop() {
                         if start.prefix != prefix || start.local != local {
-                            let (expected, actual) = if start.prefix.is_empty() {
-                                (start.local.to_string(), local.to_string())
-                            } else {
-                                (format!("{}:{}", start.prefix, start.local), format!("{prefix}:{local}"))
+                            let (expected, actual) = match start.prefix {
+                                Some(prefix) => (format!("{}:{}", prefix, start.local), format!("{prefix}:{local}")),
+                                None => (start.local.to_string(), local.to_string()),
                             };
                             let start = self.pos - actual.len() - 1;
                             let span = self.span(start, self.pos - 1);
@@ -1454,70 +1469,76 @@ impl<'a> TokenStream<'a> {
             },
             Token::Attribute { prefix, local, value } => {
                 if let Some(current) = self.temp_elements.last_mut() {
-                    // prefixed namespace - 'xmlns:prefix="foobarbaz"'
-                    if prefix == XMLNS_PREFIX {
-                        // 'xml'
-                        if local == XML_PREFIX {
-                            // 'xml' prefix can only be bound to the 'http://www.w3.org/XML/1998/namespace' namespace
-                            if value != XML_URI {
-                                let start = self.pos - value.len() - 1;
-                                return Err(ParseError::InvalidXmlPrefixUri(self.span(start, self.pos - 1)));
+                    match prefix {
+                        Some(prefix) => {
+                            // prefixed namespace - 'xmlns:prefix="foobarbaz"'
+                            if prefix == XMLNS_PREFIX {
+                                // 'xml'
+                                if local == XML_PREFIX {
+                                    // 'xml' prefix can only be bound to the 'http://www.w3.org/XML/1998/namespace' namespace
+                                    if value != XML_URI {
+                                        let start = self.pos - value.len() - 1;
+                                        return Err(ParseError::InvalidXmlPrefixUri(self.span(start, self.pos - 1)));
+                                    }
+                                }
+
+                                // Prefixes other than `xml` MUST NOT be bound to the `http://www.w3.org/XML/1998/namespace` namespace name
+                                if value == XML_URI {
+                                    let start = self.pos - prefix.len() - local.len() - value.len() - 4;
+                                    return Err(ParseError::UnexpectedXmlUri(self.span(start, self.pos - 1)));
+                                }
+
+                                // The 'xmlns' prefix is bound to the 'http://www.w3.org/2000/xmlns/' namespace and MUST NOT be declared
+                                if value == XMLNS_URI {
+                                    let start = self.pos - prefix.len() - local.len() - value.len() - 4;
+                                    return Err(ParseError::UnexpectedXmlnsUri(self.span(start, self.pos - 1)));
+                                }
+
+                                let ns = Namespace {
+                                    name: Some(local),
+                                    uri: value,
+                                    start: current.id,
+                                    end: None,
+                                };
+                                if !self.doc.namespaces.contains(&ns) {
+                                    self.doc.namespaces.push(ns.clone());
+                                }
+                                if !current.namespaces.contains(&ns) {
+                                    current.namespaces.push(ns);
+                                }
                             }
                         }
+                        None => {
+                            // Default/unprefixed namespace - 'xmlns="foobarbaz"'
+                            if local == XMLNS_PREFIX {
+                                // The 'xmlns' prefix is bound to the 'http://www.w3.org/2000/xmlns/' namespace and MUST NOT be declared
+                                if value == XMLNS_URI {
+                                    let start = self.pos - local.len() - value.len() - 3;
+                                    return Err(ParseError::UnexpectedXmlnsUri(self.span(start, self.pos - 1)));
+                                }
 
-                        // Prefixes other than `xml` MUST NOT be bound to the `http://www.w3.org/XML/1998/namespace` namespace name
-                        if value == XML_URI {
-                            let start = self.pos - prefix.len() - local.len() - value.len() - 4;
-                            return Err(ParseError::UnexpectedXmlUri(self.span(start, self.pos - 1)));
-                        }
+                                let ns = Namespace {
+                                    name: None,
+                                    uri: value,
+                                    start: current.id,
+                                    end: None,
+                                };
+                                self.doc.namespaces.push(ns.clone());
+                                current.namespaces.push(ns);
+                            }
+                            // Attribute
+                            else {
+                                if current.attributes.iter().any(|a| a.name == local) {
+                                    let start = self.pos - local.len() - value.len() - 3;
+                                    return Err(ParseError::DuplicateAttribute(
+                                        local.to_string(),
+                                        self.span(start, self.pos),
+                                    ));
+                                }
 
-                        // The 'xmlns' prefix is bound to the 'http://www.w3.org/2000/xmlns/' namespace and MUST NOT be declared
-                        if value == XMLNS_URI {
-                            let start = self.pos - prefix.len() - local.len() - value.len() - 4;
-                            return Err(ParseError::UnexpectedXmlnsUri(self.span(start, self.pos - 1)));
+                                current.attributes.push(Attribute { name: local, value });
+                            }
                         }
-
-                        let ns = Namespace {
-                            name: Some(local),
-                            uri: value,
-                            start: current.id,
-                            end: None,
-                        };
-                        if !self.doc.namespaces.contains(&ns) {
-                            self.doc.namespaces.push(ns.clone());
-                        }
-                        if !current.namespaces.contains(&ns) {
-                            current.namespaces.push(ns);
-                        }
-                    }
-                    // Default/unprefixed namespace - 'xmlns="foobarbaz"'
-                    else if local == XMLNS_PREFIX {
-                        // The 'xmlns' prefix is bound to the 'http://www.w3.org/2000/xmlns/' namespace and MUST NOT be declared
-                        if value == XMLNS_URI {
-                            let start = self.pos - local.len() - value.len() - 3;
-                            return Err(ParseError::UnexpectedXmlnsUri(self.span(start, self.pos - 1)));
-                        }
-
-                        let ns = Namespace {
-                            name: None,
-                            uri: value,
-                            start: current.id,
-                            end: None,
-                        };
-                        self.doc.namespaces.push(ns.clone());
-                        current.namespaces.push(ns);
-                    }
-                    // Attribute
-                    else {
-                        if current.attributes.iter().any(|a| a.name == local) {
-                            let start = self.pos - local.len() - value.len() - 3;
-                            return Err(ParseError::DuplicateAttribute(
-                                local.to_string(),
-                                self.span(start, self.pos),
-                            ));
-                        }
-
-                        current.attributes.push(Attribute { name: local, value });
                     }
                 }
             }
@@ -1622,7 +1643,7 @@ mod test {
                 namespaces: Vec::new(),
             },
             temp_elements: vec![TempElementData {
-                prefix: "prefix",
+                prefix: None,
                 local: "local",
                 namespaces: vec![],
                 children: vec![],
@@ -1731,7 +1752,7 @@ mod test {
         let res = stream.parse_attribute().unwrap();
         assert_eq!(
             Token::Attribute {
-                prefix: "xmlns",
+                prefix: Some("xmlns"),
                 local: "foo",
                 value: "https://www.google.com"
             },
@@ -1745,7 +1766,7 @@ mod test {
         let res = stream.parse_attribute().unwrap();
         assert_eq!(
             Token::Attribute {
-                prefix: "",
+                prefix: None,
                 local: "xmlns",
                 value: "https://www.google.com"
             },
@@ -1792,7 +1813,7 @@ mod test {
         let res = stream.parse_element_start().unwrap();
         assert_eq!(
             Token::ElementStart {
-                prefix: "",
+                prefix: None,
                 local: "hello",
             },
             res,
@@ -1974,7 +1995,7 @@ mod test {
         let res = stream.parse_attribute().unwrap();
         assert_eq!(
             Token::Attribute {
-                prefix: "",
+                prefix: None,
                 local: "b",
                 value: "c"
             },
