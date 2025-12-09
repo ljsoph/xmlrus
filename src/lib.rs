@@ -12,10 +12,15 @@ pub enum ParseError {
     /// Duplicate Attribute
     DuplicateAttribute(String, Span),
 
-    /// Duplicate Element Type declaration
+    /// Duplicate Element Type
     ///
     /// An element type MUST NOT be declared more than once.
-    DuplicateElementTypeDecl(String, Span),
+    DuplicateElementType(String, Span),
+
+    /// Duplicate Mixed Content name
+    ///
+    /// The same name MUST NOT appear more than once in a single mixed-content declaration.
+    DuplicateMixedContent(String, Span),
 
     /// Invalid Character Data
     ///
@@ -137,10 +142,18 @@ impl std::fmt::Display for ParseError {
                 )?;
                 writeln!(f, "{span}")
             }
-            ParseError::DuplicateElementTypeDecl(element, span) => {
+            ParseError::DuplicateElementType(element, span) => {
                 writeln!(
                     f,
                     "error:{}:{}: duplicate element type declaration '{}'",
+                    span.row, span.col_start, element
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::DuplicateMixedContent(element, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: duplicate name '{}' in mixed-content declaration",
                     span.row, span.col_start, element
                 )?;
                 writeln!(f, "{span}")
@@ -1048,10 +1061,6 @@ impl<'a> TokenStream<'a> {
 
     // elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
     // contentspec  ::=  'EMPTY' | 'ANY' | Mixed | children
-    // children     ::=  (choice | seq) ('?' | '*' | '+')?
-    // cp           ::=  (Name | choice | seq) ('?' | '*' | '+')?
-    // choice       ::=  '(' S? cp ( S? '|' S? cp )+ S? ')'         TODO: [VC: Proper Group/PE Nesting]
-    // seq          ::=  '(' S? cp ( S? ',' S? cp )* S? ')'         TODO: [VC: Proper Group/PE Nesting]
     fn parse_element_type_decl(&mut self) -> ParseResult<()> {
         self.advance(9);
 
@@ -1067,7 +1076,7 @@ impl<'a> TokenStream<'a> {
 
         // An element type MUST NOT be declared more than once.
         if self.element_types.iter().any(|el| el.name == name) {
-            return Err(ParseError::DuplicateElementTypeDecl(
+            return Err(ParseError::DuplicateElementType(
                 name.to_string(),
                 self.span(start, self.pos - 1),
             ));
@@ -1088,6 +1097,13 @@ impl<'a> TokenStream<'a> {
         } else if self.peek_seq("(") {
             // TODO: Parse 'Mixed' & 'children' content specs
             self.consume_byte(b'(')?;
+            self.consume_whitespace();
+
+            if self.peek_seq("#PCDATA") {
+                self.parse_mixed_content(name)?;
+            } else {
+                self.parse_element_content()?;
+            }
         } else {
             return Err(ParseError::InvalidElementTypeDecl(self.span(start, self.pos)));
         }
@@ -1095,6 +1111,73 @@ impl<'a> TokenStream<'a> {
         self.consume_whitespace();
         self.consume_byte(b'>')?;
 
+        Ok(())
+    }
+
+    // Mixed  ::=  '(' S? '#PCDATA' (S? '|' S? Name)* S? ')*' | '(' S? '#PCDATA' S? ')'
+    fn parse_mixed_content(&mut self, name: &'a str) -> ParseResult<()> {
+        let mut names = vec![];
+
+        let start = self.pos;
+        self.advance(7);
+        names.push(self.slice(start, self.pos));
+
+        self.consume_whitespace();
+
+        loop {
+            match self.current_byte()? {
+                b'|' => {
+                    self.advance(1);
+                    self.consume_whitespace();
+                    let name_start = self.pos;
+                    loop {
+                        match self.current_byte()? {
+                            b'|' | b')' | b' ' | b'\t' | b'\n' | b'\r' => break,
+                            _ => self.advance(1),
+                        }
+                    }
+
+                    // TODO: Validity Constraint: Proper Group/PE Nesting (https://www.w3.org/TR/xml/#vc-PEinGroup)
+                    let name = self.slice(name_start, self.pos);
+                    validate::is_valid_name(name, name_start, self)?;
+
+                    // The same name MUST NOT appear more than once in a single mixed-content declaration.
+                    if names.contains(&name) {
+                        return Err(ParseError::DuplicateMixedContent(
+                            name.to_string(),
+                            self.span(name_start, self.pos),
+                        ));
+                    }
+
+                    names.push(name);
+                    self.consume_whitespace();
+                }
+                b')' => break,
+                _ => unreachable!(
+                    "this should never happen but you should never say never so it should probably be handled but that is a future me problem"
+                ),
+            }
+        }
+
+        self.consume_byte(b')')?;
+
+        if names.len() > 1 {
+            self.consume_byte(b'*')?;
+        }
+
+        self.element_types.push(ElementTypeDecl {
+            name,
+            content_spec: ContentSpec::MixedContent(names),
+        });
+
+        Ok(())
+    }
+
+    // children     ::=  (choice | seq) ('?' | '*' | '+')?
+    // cp           ::=  (Name | choice | seq) ('?' | '*' | '+')?
+    // choice       ::=  '(' S? cp ( S? '|' S? cp )+ S? ')'         TODO: [VC: Proper Group/PE Nesting]
+    // seq          ::=  '(' S? cp ( S? ',' S? cp )* S? ')'         TODO: [VC: Proper Group/PE Nesting]
+    fn parse_element_content(&mut self) -> ParseResult<()> {
         Ok(())
     }
 
