@@ -715,23 +715,17 @@ impl<'a> TokenStream<'a> {
         }
     }
 
-    fn consume_name(&mut self) -> ParseResult<&'a str> {
+    fn parse_name(&mut self) -> ParseResult<&'a str> {
         let start = self.pos;
 
-        loop {
-            match self.current_byte()? {
-                b'>' => break,
-                _ if self.is_white_space()? => break,
-                _ => self.advance(1),
+        while let Ok(cur) = self.current_byte() {
+            if !validate::is_name_char(cur as char) {
+                return Ok(self.slice(start, self.pos));
             }
-
             self.advance(1);
         }
 
-        let name = self.slice(start, self.pos);
-        validate::is_valid_name(name, start, self)?;
-
-        Ok(name)
+        Err(ParseError::UnexpectedEndOfStream)
     }
 
     fn consume_quote(&mut self) -> ParseResult<u8> {
@@ -1023,7 +1017,7 @@ impl<'a> TokenStream<'a> {
         self.advance(9);
         self.expect_and_consume_whitespace()?;
 
-        let name = self.consume_name()?;
+        let name = self.parse_name()?;
         self.doc.name = Some(name);
 
         // TODO: ExternalId
@@ -1066,9 +1060,7 @@ impl<'a> TokenStream<'a> {
 
         let start = self.pos;
         self.expect_and_consume_whitespace()?;
-        let name = self.consume_name()?;
-
-        validate::is_valid_name(name, start, self)?;
+        let name = self.parse_name()?;
 
         if let Err(_) = self.expect_and_consume_whitespace() {
             return Err(ParseError::InvalidElementTypeDecl(self.span(start + 1, self.pos)));
@@ -1129,23 +1121,14 @@ impl<'a> TokenStream<'a> {
                 b'|' => {
                     self.advance(1);
                     self.consume_whitespace();
-                    let name_start = self.pos;
-                    loop {
-                        match self.current_byte()? {
-                            b'|' | b')' | b' ' | b'\t' | b'\n' | b'\r' => break,
-                            _ => self.advance(1),
-                        }
-                    }
 
-                    // TODO: Validity Constraint: Proper Group/PE Nesting (https://www.w3.org/TR/xml/#vc-PEinGroup)
-                    let name = self.slice(name_start, self.pos);
-                    validate::is_valid_name(name, name_start, self)?;
+                    let name = self.parse_name()?;
 
                     // The same name MUST NOT appear more than once in a single mixed-content declaration.
                     if names.contains(&name) {
                         return Err(ParseError::DuplicateMixedContent(
                             name.to_string(),
-                            self.span(name_start, self.pos),
+                            self.span(self.pos - name.len(), self.pos),
                         ));
                     }
 
@@ -1190,12 +1173,8 @@ impl<'a> TokenStream<'a> {
         self.advance(8);
         self.expect_and_consume_whitespace()?;
 
-        let start = self.pos;
-        let name = self.consume_name()?;
-
-        validate::is_valid_name(name, start, self)?;
+        let name = self.parse_name()?;
         self.expect_and_consume_whitespace()?;
-
         let value = match self.current_byte()? {
             b'\'' | b'"' => self.parse_entity_value(name)?,
             b => return Err(ParseError::UnexpectedCharacter2("`'` or `\"`", b, self.span_single())),
