@@ -56,11 +56,11 @@ pub enum ParseError {
     /// Valid values [yes | no]
     InvalidStandalone(String, Span),
 
-    /// Invalid Tag Name
-    InvalidTagName(Span),
-
     /// Invalid XML character
     InvalidXmlChar(char, Span),
+
+    /// Invalid XML Name
+    InvalidXmlName(Span),
 
     /// Invalid XML Prefix URI
     ///
@@ -207,7 +207,7 @@ impl std::fmt::Display for ParseError {
                 writeln!(f, "  Expected: [yes | no]\n  Actual:   [{actual}]")?;
                 writeln!(f, "\n{span}")
             }
-            ParseError::InvalidTagName(span) => {
+            ParseError::InvalidXmlName(span) => {
                 writeln!(f, "error:{}:{}: invalid tag", span.row, span.col_start)?;
                 writeln!(f, "{span}")
             }
@@ -657,6 +657,45 @@ impl<'a> TokenStream<'a> {
         Ok(self.source.as_bytes()[self.pos])
     }
 
+    // First Code Point  Last Code Point  Byte 1    Byte 2    Byte 3    Byte 4
+    // U+0000            U+007F           0yyyzzzz
+    // U+0080            U+07FF           110xxxyy  10yyzzzz
+    // U+0800            U+FFFF           1110wwww  10xxxxyy  10yyzzzz
+    // U+010000          U+10FFFF         11110uvv  10vvwwww  10xxxxyy  10yyzzzz
+    pub fn current_char(&mut self) -> ParseResult<char> {
+        let mut res = 0u32;
+        let b1 = self.current_byte()?;
+
+        // 1 byte
+        if b1 < 0x80 {
+            return Ok(b1 as char);
+        }
+        // 2 bytes
+        else if b1 < 0xe0 {
+            self.advance(1);
+            res |= (b1 as u32 & 0x1f) << 6;
+            res |= (self.consume_byte()? as u32) & 0x3f;
+        }
+        // 3 bytes
+        else if b1 < 0xf0 {
+            self.advance(1);
+            res |= (b1 as u32 & 0x0f) << 12;
+            res |= (self.consume_byte()? as u32 & 0x3f) << 6;
+            res |= self.consume_byte()? as u32 & 0x3f;
+        }
+        // 4 bytes
+        else {
+            self.advance(1);
+            res |= (b1 as u32 & 0x07) << 18;
+            res |= (self.consume_byte()? as u32 & 0x3f) << 12;
+            res |= (self.consume_byte()? as u32 & 0x3f) << 6;
+            res |= self.consume_byte()? as u32;
+        }
+
+        // Who needs validation
+        char::from_u32(res).ok_or(ParseError::WTF(self.span_single()))
+    }
+
     fn unchecked_current_byte(&mut self) -> u8 {
         self.source.as_bytes()[self.pos]
     }
@@ -717,14 +756,23 @@ impl<'a> TokenStream<'a> {
         Ok(())
     }
 
-    fn consume_eq(&mut self) -> ParseResult<()> {
+    fn consume_byte(&mut self) -> ParseResult<u8> {
+        if self.is_at_end() {
+            return Err(ParseError::UnexpectedEndOfStream);
+        }
+
+        let b = self.source.as_bytes()[self.pos];
+        self.advance(1);
+        Ok(b)
+    }
+
+    fn expect_byte(&mut self, c: u8) -> ParseResult<()> {
         let current = self.current_byte()?;
-        if current != b'=' {
-            return Err(ParseError::UnexpectedCharacter(b'=', current, self.span_single()));
+        if current != c {
+            return Err(ParseError::UnexpectedCharacter(c, current, self.span_single()));
         }
 
         self.advance(1);
-
         Ok(())
     }
 
@@ -739,19 +787,6 @@ impl<'a> TokenStream<'a> {
         }
     }
 
-    fn parse_name(&mut self) -> ParseResult<&'a str> {
-        let start = self.pos;
-
-        while let Ok(cur) = self.current_byte() {
-            if !validate::is_name_char(cur as char) {
-                return Ok(self.slice(start, self.pos));
-            }
-            self.advance(1);
-        }
-
-        Err(ParseError::UnexpectedEndOfStream)
-    }
-
     fn consume_quote(&mut self) -> ParseResult<u8> {
         let current = self.current_byte()?;
         if current == b'\'' || current == b'"' {
@@ -760,16 +795,6 @@ impl<'a> TokenStream<'a> {
         }
 
         Err(ParseError::UnexpectedCharacter2("a quote", current, self.span_single()))
-    }
-
-    fn consume_byte(&mut self, c: u8) -> ParseResult<()> {
-        let current = self.current_byte()?;
-        if current != c {
-            return Err(ParseError::UnexpectedCharacter(c, current, self.span_single()));
-        }
-
-        self.advance(1);
-        Ok(())
     }
 
     fn has_prefix(&self, prefix: &str) -> bool {
@@ -807,6 +832,49 @@ impl<'a> TokenStream<'a> {
         }
 
         false
+    }
+
+    fn parse_name(&mut self) -> ParseResult<&'a str> {
+        let start = self.pos;
+
+        if !validate::is_name_start_char(self.current_char()?) {
+            return Err(ParseError::InvalidXmlName(self.span_single()));
+        }
+
+        loop {
+            let c = self.current_char()?;
+            if !validate::is_name_char(c) {
+                break;
+            }
+            self.advance(1);
+        }
+
+        let name = self.slice(start, self.pos);
+        validate::is_valid_name(name, start, self)?;
+
+        Ok(name)
+    }
+
+    fn parse_nc_name(&mut self) -> ParseResult<&'a str> {
+        let start = self.pos;
+
+        let current = self.current_char()?;
+        if !validate::is_name_start_char(current) || current == ':' {
+            return Err(ParseError::InvalidXmlName(self.span_single()));
+        }
+
+        loop {
+            let c = self.current_char()?;
+            if !validate::is_name_char(c) || c == ':' {
+                break;
+            }
+            self.advance(1);
+        }
+
+        let name = self.slice(start, self.pos);
+        validate::is_valid_name(name, start, self)?;
+
+        Ok(name)
     }
 
     /// Parses the source input, emitting a stream of tokens to build up the
@@ -904,7 +972,7 @@ impl<'a> TokenStream<'a> {
 
         self.advance(7);
         self.consume_whitespace();
-        self.consume_eq()?;
+        self.expect_byte(b'=')?;
         self.consume_whitespace();
 
         let version = self.parse_attribute_value()?;
@@ -912,7 +980,7 @@ impl<'a> TokenStream<'a> {
         self.consume_whitespace();
         let encoding = if self.starts_with("encoding") {
             self.advance(8);
-            self.consume_eq()?;
+            self.expect_byte(b'=')?;
             Some(self.parse_attribute_value()?)
         } else {
             None
@@ -922,7 +990,7 @@ impl<'a> TokenStream<'a> {
         let standalone = if self.peek_seq("standalone") {
             let start = self.pos;
             self.advance(10);
-            self.consume_eq()?;
+            self.expect_byte(b'=')?;
 
             let value = self.parse_attribute_value()?;
             if value == "yes" || value == "no" {
@@ -966,28 +1034,7 @@ impl<'a> TokenStream<'a> {
         }
 
         self.advance(2);
-        let target_start = self.pos;
-
-        if self.is_white_space()? {
-            return Err(ParseError::InvalidTagName(self.span(target_start, target_start + 1)));
-        }
-
-        loop {
-            if self.is_at_end() {
-                return Err(ParseError::UnexpectedEndOfStream);
-            }
-
-            if self.is_white_space()? || self.unchecked_current_byte() == b'?' {
-                break;
-            }
-
-            self.advance(1);
-        }
-
-        // We already know the target != [(('X' | 'x') ('M' | 'm') ('L' | 'l'))]
-        // so we only need to ensure it is a valid 'Name'
-        let target = self.slice(target_start, self.pos);
-        validate::is_valid_name(target, target_start, self)?;
+        let target = self.parse_name()?;
 
         if let Ok(b'?') = self.current_byte() {
             let peek = self.peek_byte()?;
@@ -1049,7 +1096,7 @@ impl<'a> TokenStream<'a> {
         self.consume_whitespace();
 
         if let Ok(b'[') = self.current_byte() {
-            self.consume_byte(b'[')?;
+            self.expect_byte(b'[')?;
 
             // Parse 'intSubset'
             loop {
@@ -1068,11 +1115,11 @@ impl<'a> TokenStream<'a> {
                 }
             }
 
-            self.consume_byte(b']')?;
+            self.expect_byte(b']')?;
             self.consume_whitespace();
         }
 
-        self.consume_byte(b'>')?;
+        self.expect_byte(b'>')?;
 
         Ok(())
     }
@@ -1112,7 +1159,7 @@ impl<'a> TokenStream<'a> {
             self.advance(3);
         } else if self.peek_seq("(") {
             // TODO: Parse 'Mixed' & 'children' content specs
-            self.consume_byte(b'(')?;
+            self.expect_byte(b'(')?;
             self.consume_whitespace();
 
             if self.peek_seq("#PCDATA") {
@@ -1125,7 +1172,7 @@ impl<'a> TokenStream<'a> {
         }
 
         self.consume_whitespace();
-        self.consume_byte(b'>')?;
+        self.expect_byte(b'>')?;
 
         Ok(())
     }
@@ -1166,10 +1213,10 @@ impl<'a> TokenStream<'a> {
             }
         }
 
-        self.consume_byte(b')')?;
+        self.expect_byte(b')')?;
 
         if names.len() > 1 {
-            self.consume_byte(b'*')?;
+            self.expect_byte(b'*')?;
         }
 
         self.element_types.push(ElementTypeDecl {
@@ -1278,7 +1325,7 @@ impl<'a> TokenStream<'a> {
             }
         }
 
-        self.consume_byte(b')')?;
+        self.expect_byte(b')')?;
         let repetition = match self.current_byte()? {
             b'?' => {
                 self.advance(1);
@@ -1302,9 +1349,9 @@ impl<'a> TokenStream<'a> {
 
     fn parse_parameter_entity_ref(&mut self) -> ParseResult<()> {
         // TODO: Something with me
-        self.consume_byte(b'%')?;
+        self.expect_byte(b'%')?;
         let _name = self.parse_name()?;
-        self.consume_byte(b';')?;
+        self.expect_byte(b';')?;
         Ok(())
     }
 
@@ -1324,7 +1371,7 @@ impl<'a> TokenStream<'a> {
             b => return Err(ParseError::UnexpectedCharacter2("`'` or `\"`", b, self.span_single())),
         };
 
-        self.consume_byte(b'>')?;
+        self.expect_byte(b'>')?;
 
         // TODO: Does this need to be an error?
         // If the same entity is declared more than once, the first declaration encountered is binding
@@ -1388,7 +1435,7 @@ impl<'a> TokenStream<'a> {
                 }
                 b'/' => {
                     self.advance(1);
-                    self.consume_byte(b'>')?;
+                    self.expect_byte(b'>')?;
                     self.emit_token(Token::ElementEnd {
                         kind: ElementEndKind::Empty,
                     })?;
@@ -1425,7 +1472,7 @@ impl<'a> TokenStream<'a> {
         self.advance(1);
 
         if self.is_white_space()? {
-            return Err(ParseError::InvalidTagName(self.span_single()));
+            return Err(ParseError::InvalidXmlName(self.span_single()));
         }
 
         let (prefix, local) = self.parse_qname()?;
@@ -1445,7 +1492,7 @@ impl<'a> TokenStream<'a> {
     fn parse_attribute(&mut self) -> ParseResult<Token<'a>> {
         let (prefix, local) = self.parse_qname()?;
         self.consume_whitespace();
-        self.consume_eq()?;
+        self.expect_byte(b'=')?;
         self.consume_whitespace();
         let value = self.parse_attribute_value()?;
         Ok(Token::Attribute { prefix, local, value })
@@ -1476,11 +1523,11 @@ impl<'a> TokenStream<'a> {
         self.advance(2);
 
         if self.is_white_space()? {
-            return Err(ParseError::InvalidTagName(self.span_single()));
+            return Err(ParseError::InvalidXmlName(self.span_single()));
         }
 
         let (prefix, local) = self.parse_qname()?;
-        self.consume_byte(b'>')?;
+        self.expect_byte(b'>')?;
 
         self.emit_token(Token::ElementEnd {
             kind: ElementEndKind::Close { prefix, local },
@@ -1498,26 +1545,18 @@ impl<'a> TokenStream<'a> {
     fn parse_qname(&mut self) -> ParseResult<(Option<&'a str>, &'a str)> {
         let start = self.pos;
 
-        while let Ok(c) = self.current_byte() {
-            if c == b':' {
-                break;
-            }
+        let local = self.parse_nc_name()?;
 
-            // We have not come across a ':' so this is an UnprefixedName
-            if !validate::is_name_char(c as char) {
-                let local = self.slice(start, self.pos);
-                if local.is_empty() {
-                    return Err(ParseError::InvalidTagName(self.span_single()));
-                }
-                return Ok((None, local));
+        if self.current_byte()? != b':' {
+            if local.is_empty() {
+                return Err(ParseError::InvalidXmlName(self.span_single()));
             }
-
-            self.advance(1);
+            return Ok((None, local));
         }
 
-        let prefix = self.slice(start, self.pos);
+        let prefix = local;
         if prefix.is_empty() {
-            return Err(ParseError::InvalidTagName(self.span_single()));
+            return Err(ParseError::InvalidXmlName(self.span_single()));
         }
 
         // 'xml' prefix will be mapped to 'http://www.w3.org/XML/1998/namespace'
@@ -1525,23 +1564,11 @@ impl<'a> TokenStream<'a> {
             return Err(ParseError::UnknownPrefix(prefix.to_owned(), self.span(start, self.pos)));
         }
 
-        self.advance(1);
-        let start = self.pos;
-        while let Ok(c) = self.current_byte() {
-            if !validate::is_name_char(c as char) {
-                break;
-            }
+        self.expect_byte(b':')?;
 
-            if c == b':' {
-                return Err(ParseError::InvalidNamespaceChar(':', self.span_single()));
-            }
-
-            self.advance(1);
-        }
-
-        let local = self.slice(start, self.pos);
+        let local = self.parse_nc_name()?;
         if local.is_empty() {
-            return Err(ParseError::InvalidTagName(self.span_single()));
+            return Err(ParseError::InvalidXmlName(self.span_single()));
         }
 
         Ok((Some(prefix), local))
@@ -1998,7 +2025,7 @@ mod test {
     fn test_parse_pi_invalid_target_leading_whitespace() {
         let mut stream = stream_from(r#"<? target world?>"#);
         let res = stream.parse_processing_instruction();
-        assert!(matches!(res, Err(ParseError::InvalidTagName(_))));
+        assert!(matches!(res, Err(ParseError::InvalidXmlName(_))));
     }
 
     #[test]
@@ -2196,7 +2223,7 @@ mod test {
     #[test]
     fn test_parse_element_invalid_tag_name() {
         let res = Parser::parse(r#"< name/>"#);
-        assert!(matches!(res, Err(ParseError::InvalidTagName(_))));
+        assert!(matches!(res, Err(ParseError::InvalidXmlName(_))));
     }
 
     #[test]
