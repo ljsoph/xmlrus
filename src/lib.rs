@@ -476,7 +476,7 @@ pub enum NodeKind<'a> {
     CData(&'a str),
 }
 
-struct EntityDecl<'a> {
+struct Entity<'a> {
     name: &'a str,
     value: &'a str,
 }
@@ -489,8 +489,32 @@ struct ElementTypeDecl<'a> {
 enum ContentSpec<'a> {
     Empty,
     Any,
-    Mixed(Vec<&'a str>),
-    Children(Vec<&'a str>),
+    MixedContent(Vec<&'a str>),
+    ElementContent(ElementContent<'a>),
+}
+
+#[derive(Debug)]
+struct ElementContent<'a> {
+    content: Vec<ElementContentType<'a>>,
+}
+
+#[derive(Debug)]
+enum ElementContentType<'a> {
+    Name { value: &'a str, repetition: Repetition },
+    Choice(Vec<ElementContentType<'a>>),
+    Seq(Vec<ElementContentType<'a>>),
+}
+
+#[derive(Debug)]
+enum Repetition {
+    // one or more
+    Plus,
+    // zero or more
+    Star,
+    // zero or one
+    QuestionMark,
+    // once
+    Once,
 }
 
 pub struct Parser;
@@ -611,7 +635,7 @@ pub struct TokenStream<'a> {
     len: usize,
     doc: Document<'a>,
     temp_elements: Vec<TempElementData<'a>>,
-    entities: Vec<EntityDecl<'a>>,
+    entities: Vec<Entity<'a>>,
     element_types: Vec<ElementTypeDecl<'a>>,
     current_node_id: usize,
 }
@@ -1062,7 +1086,7 @@ impl<'a> TokenStream<'a> {
         self.expect_and_consume_whitespace()?;
         let name = self.parse_name()?;
 
-        if let Err(_) = self.expect_and_consume_whitespace() {
+        if self.expect_and_consume_whitespace().is_err() {
             return Err(ParseError::InvalidElementTypeDecl(self.span(start + 1, self.pos)));
         }
 
@@ -1161,6 +1185,126 @@ impl<'a> TokenStream<'a> {
     // choice       ::=  '(' S? cp ( S? '|' S? cp )+ S? ')'         TODO: [VC: Proper Group/PE Nesting]
     // seq          ::=  '(' S? cp ( S? ',' S? cp )* S? ')'         TODO: [VC: Proper Group/PE Nesting]
     fn parse_element_content(&mut self) -> ParseResult<()> {
+        // Leading '(' and any whitespace was already consumed
+        match self.current_byte()? {
+            b'%' => self.parse_parameter_entity_ref()?,
+            b'(' => {
+                // Started with a nested content particle
+                self.advance(1);
+                self.parse_element_content()?;
+            }
+            _ => {
+                let name = self.parse_name()?;
+                let repetition = match self.current_byte()? {
+                    b'?' => {
+                        self.advance(1);
+                        Repetition::QuestionMark
+                    }
+                    b'*' => {
+                        self.advance(1);
+                        Repetition::Star
+                    }
+                    b'+' => {
+                        self.advance(1);
+                        Repetition::Plus
+                    }
+                    _ => Repetition::Once,
+                };
+
+                let particle = ElementContentType::Name {
+                    value: name,
+                    repetition,
+                };
+
+                dbg!(&particle);
+            }
+        }
+
+        let mut content_type: Option<ElementContentType> = None;
+        loop {
+            self.consume_whitespace();
+
+            match self.current_byte()? {
+                b'%' => self.parse_parameter_entity_ref()?,
+                b')' => break,
+                b',' => {
+                    match content_type {
+                        None => content_type = Some(ElementContentType::Seq(Vec::new())),
+                        Some(ElementContentType::Choice(_)) => panic!("TODO: Invalid element content sep"),
+                        Some(ElementContentType::Name { .. }) => panic!("TODO: Invalid element content sep"),
+                        Some(ElementContentType::Seq(_)) => {}
+                    }
+                    self.advance(1);
+                }
+
+                b'|' => {
+                    match content_type {
+                        None => content_type = Some(ElementContentType::Choice(Vec::new())),
+                        Some(ElementContentType::Seq(_)) => panic!("TODO: Invalid element content sep"),
+                        Some(ElementContentType::Name { .. }) => panic!("TODO: Invalid element content sep"),
+                        Some(ElementContentType::Choice(_)) => {}
+                    }
+                    self.advance(1);
+                }
+                b'(' => {
+                    self.advance(1);
+                    self.parse_element_content()?;
+                }
+                _ => {
+                    let name = self.parse_name()?;
+                    let repetition = match self.current_byte()? {
+                        b'?' => {
+                            self.advance(1);
+                            Repetition::QuestionMark
+                        }
+                        b'*' => {
+                            self.advance(1);
+                            Repetition::Star
+                        }
+                        b'+' => {
+                            self.advance(1);
+                            Repetition::Plus
+                        }
+                        _ => Repetition::Once,
+                    };
+
+                    let particle = ElementContentType::Name {
+                        value: name,
+                        repetition,
+                    };
+
+                    dbg!(&particle);
+                }
+            }
+        }
+
+        self.consume_byte(b')')?;
+        let repetition = match self.current_byte()? {
+            b'?' => {
+                self.advance(1);
+                Repetition::QuestionMark
+            }
+            b'*' => {
+                self.advance(1);
+                Repetition::Star
+            }
+            b'+' => {
+                self.advance(1);
+                Repetition::Plus
+            }
+            _ => Repetition::Once,
+        };
+
+        dbg!(repetition);
+
+        Ok(())
+    }
+
+    fn parse_parameter_entity_ref(&mut self) -> ParseResult<()> {
+        // TODO: Something with me
+        self.consume_byte(b'%')?;
+        let _name = self.parse_name()?;
+        self.consume_byte(b';')?;
         Ok(())
     }
 
@@ -1188,7 +1332,7 @@ impl<'a> TokenStream<'a> {
             return Ok(());
         }
 
-        self.entities.push(EntityDecl { name, value });
+        self.entities.push(Entity { name, value });
 
         Ok(())
     }
