@@ -500,7 +500,7 @@ struct ElementContent<'a> {
 
 #[derive(Debug)]
 enum ElementContentType<'a> {
-    Name { value: &'a str, repetition: Repetition },
+    Name { name: &'a str, repetition: Repetition },
     Choice(Vec<ElementContentType<'a>>),
     Seq(Vec<ElementContentType<'a>>),
 }
@@ -538,7 +538,8 @@ impl Parser {
             element_types: Vec::new(),
             current_node_id: 0,
         };
-        stream.parse_document()?;
+
+        parse_document(&mut stream)?;
 
         Ok(stream.doc)
     }
@@ -664,32 +665,36 @@ impl<'a> TokenStream<'a> {
     // U+010000          U+10FFFF         11110uvv  10vvwwww  10xxxxyy  10yyzzzz
     pub fn current_char(&mut self) -> ParseResult<char> {
         let mut res = 0u32;
-        let b1 = self.current_byte()?;
+        let len = match self.current_byte()? {
+            b if b < 0x80 => 1,
+            b if b < 0xe0 => 2,
+            b if b < 0xf0 => 3,
+            _ => 4,
+        };
 
-        // 1 byte
-        if b1 < 0x80 {
-            return Ok(b1 as char);
+        if self.pos + len > self.len {
+            return Err(ParseError::UnexpectedEndOfStream);
         }
-        // 2 bytes
-        else if b1 < 0xe0 {
-            self.advance(1);
-            res |= (b1 as u32 & 0x1f) << 6;
-            res |= (self.consume_byte()? as u32) & 0x3f;
-        }
-        // 3 bytes
-        else if b1 < 0xf0 {
-            self.advance(1);
-            res |= (b1 as u32 & 0x0f) << 12;
-            res |= (self.consume_byte()? as u32 & 0x3f) << 6;
-            res |= self.consume_byte()? as u32 & 0x3f;
-        }
-        // 4 bytes
-        else {
-            self.advance(1);
-            res |= (b1 as u32 & 0x07) << 18;
-            res |= (self.consume_byte()? as u32 & 0x3f) << 12;
-            res |= (self.consume_byte()? as u32 & 0x3f) << 6;
-            res |= self.consume_byte()? as u32;
+
+        let pos = self.pos;
+        let bytes = self.source.as_bytes();
+        match len {
+            1 => return Ok(bytes[pos] as char),
+            2 => {
+                res |= (bytes[pos] as u32 & 0x1f) << 6;
+                res |= (bytes[pos + 1] as u32) & 0x3f;
+            }
+            3 => {
+                res |= (bytes[pos] as u32 & 0x0f) << 12;
+                res |= (bytes[pos + 1] as u32 & 0x3f) << 6;
+                res |= bytes[pos + 2] as u32 & 0x3f;
+            }
+            _ => {
+                res |= (bytes[pos] as u32 & 0x07) << 18;
+                res |= (bytes[pos + 1] as u32 & 0x3f) << 12;
+                res |= (bytes[pos + 2] as u32 & 0x3f) << 6;
+                res |= bytes[pos + 3] as u32;
+            }
         }
 
         // Who needs validation
@@ -754,16 +759,6 @@ impl<'a> TokenStream<'a> {
         self.consume_whitespace();
 
         Ok(())
-    }
-
-    fn consume_byte(&mut self) -> ParseResult<u8> {
-        if self.is_at_end() {
-            return Err(ParseError::UnexpectedEndOfStream);
-        }
-
-        let b = self.source.as_bytes()[self.pos];
-        self.advance(1);
-        Ok(b)
     }
 
     fn expect_byte(&mut self, c: u8) -> ParseResult<()> {
@@ -832,862 +827,6 @@ impl<'a> TokenStream<'a> {
         }
 
         false
-    }
-
-    fn parse_name(&mut self) -> ParseResult<&'a str> {
-        let start = self.pos;
-
-        if !validate::is_name_start_char(self.current_char()?) {
-            return Err(ParseError::InvalidXmlName(self.span_single()));
-        }
-
-        loop {
-            let c = self.current_char()?;
-            if !validate::is_name_char(c) {
-                break;
-            }
-            self.advance(1);
-        }
-
-        let name = self.slice(start, self.pos);
-        validate::is_valid_name(name, start, self)?;
-
-        Ok(name)
-    }
-
-    fn parse_nc_name(&mut self) -> ParseResult<&'a str> {
-        let start = self.pos;
-
-        let current = self.current_char()?;
-        if !validate::is_name_start_char(current) || current == ':' {
-            return Err(ParseError::InvalidXmlName(self.span_single()));
-        }
-
-        loop {
-            let c = self.current_char()?;
-            if !validate::is_name_char(c) || c == ':' {
-                break;
-            }
-            self.advance(1);
-        }
-
-        let name = self.slice(start, self.pos);
-        validate::is_valid_name(name, start, self)?;
-
-        Ok(name)
-    }
-
-    /// Parses the source input, emitting a stream of tokens to build up the
-    /// resulting `Document`
-    ///
-    /// Document  ::=  prolog element Misc*
-    fn parse_document(&mut self) -> ParseResult<()> {
-        self.parse_prolog()?;
-
-        // Parse any comments, PIs, or whitespace before the root element
-        while !self.is_at_end() {
-            match self.unchecked_current_byte() {
-                b' ' | b'\t' | b'\n' | b'\r' => {
-                    self.advance(1);
-                }
-                b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
-                b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
-                // Start of the root node, break and parse outside of the loop.
-                b'<' => break,
-                _ => return Err(ParseError::WTF(self.span_single())),
-            }
-        }
-
-        self.consume_whitespace();
-
-        if self.is_at_end() {
-            return Err(ParseError::MissingRoot);
-        }
-
-        self.parse_element(ElementType::Root)?;
-
-        if !self.temp_elements.is_empty() {
-            return Err(ParseError::UnclosedRoot);
-        }
-
-        // Parse any comments or PIs after the root node
-        self.parse_misc()?;
-
-        if !self.is_at_end() {
-            return Err(ParseError::UnexpectedElement(self.span(self.pos, self.pos + 1)));
-        }
-
-        Ok(())
-    }
-
-    // prolog  ::=  XMLDecl? Misc* (doctypedecl Misc*)?
-    fn parse_prolog(&mut self) -> ParseResult<()> {
-        // There can only be one XML declaration, and it must be at the absolute start
-        // of the Document, i.e., no characters are allowed before it (including whitespace)
-        if self.starts_with("<?xml ") {
-            self.parse_xml_decl()?;
-        }
-
-        self.parse_misc()?;
-
-        if self.peek_seq("<!DOCTYPE") {
-            self.parse_doc_type_decl()?;
-            self.parse_misc()?;
-        }
-
-        Ok(())
-    }
-
-    // Misc  ::=  Comment | PI | S
-    fn parse_misc(&mut self) -> ParseResult<()> {
-        while !self.is_at_end() {
-            match self.unchecked_current_byte() {
-                b' ' | b'\t' | b'\n' | b'\r' => self.advance(1),
-                b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
-                b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
-                _ => break,
-            }
-        }
-
-        Ok(())
-    }
-
-    // XMLDecl       ::=   '<?xml' VersionInfo EncodingDecl? SDDecl? S? '?>'
-    // VersionInfo   ::=   S 'version' Eq ("'" VersionNum "'" | '"' VersionNum '"')
-    // Eq            ::=   S? '=' S?
-    // VersionNum    ::=   '1.' [0-9]+
-    // EncodingDecl  ::=   S 'encoding' Eq ('"' EncName '"' | "'" EncName "'" )
-    // EncName       ::=   [A-Za-z] ([A-Za-z0-9._] | '-')* /* Encoding name contains only Latin characters */
-    // SDDecl        ::=   S 'standalone' Eq (("'" ('yes' | 'no') "'") | ('"' ('yes' | 'no') '"')) [VC: Standalone Document Declaration]
-    fn parse_xml_decl(&mut self) -> ParseResult<()> {
-        self.advance(5);
-        self.consume_whitespace();
-
-        if !self.peek_seq("version") {
-            return Err(ParseError::InvalidDeclaration(
-                String::from("version attribute"),
-                self.span(self.pos, self.pos + 1),
-            ));
-        }
-
-        self.advance(7);
-        self.consume_whitespace();
-        self.expect_byte(b'=')?;
-        self.consume_whitespace();
-
-        let version = self.parse_attribute_value()?;
-
-        self.consume_whitespace();
-        let encoding = if self.starts_with("encoding") {
-            self.advance(8);
-            self.expect_byte(b'=')?;
-            Some(self.parse_attribute_value()?)
-        } else {
-            None
-        };
-
-        self.consume_whitespace();
-        let standalone = if self.peek_seq("standalone") {
-            let start = self.pos;
-            self.advance(10);
-            self.expect_byte(b'=')?;
-
-            let value = self.parse_attribute_value()?;
-            if value == "yes" || value == "no" {
-                Some(value)
-            } else {
-                return Err(ParseError::InvalidStandalone(
-                    value.to_owned(),
-                    self.span(start, self.pos),
-                ));
-            }
-        } else {
-            None
-        };
-
-        // TODO: While it is valid for the declaration to span multiple lines, if there is no '?>'
-        // and the next non-whitespace character is the next element, the diagnostics will report
-        // the incorrect source line.
-        self.consume_whitespace();
-        if !self.peek_seq("?>") {
-            return Err(ParseError::InvalidDeclaration(
-                String::from("?>"),
-                self.span(self.pos, self.pos + 1),
-            ));
-        }
-
-        self.advance(2);
-        self.emit_token(Token::Declaration {
-            version,
-            encoding,
-            standalone,
-        })?;
-
-        Ok(())
-    }
-
-    // PI        ::=   '<?' PITarget  (S (Char* - ( Char* '?>' Char*)))? '?>'
-    // PITarget  ::=   Name - (('X' | 'x') ('M' | 'm') ('L' | 'l'))
-    fn parse_processing_instruction(&mut self) -> ParseResult<()> {
-        if self.starts_with("<?xml ") {
-            return Err(ParseError::UnexpectedDeclaration(self.span(self.pos, self.pos + 1)));
-        }
-
-        self.advance(2);
-        let target = self.parse_name()?;
-
-        if let Ok(b'?') = self.current_byte() {
-            let peek = self.peek_byte()?;
-            match peek {
-                b'>' => {
-                    self.advance(2);
-                    self.emit_token(Token::ProcessingInstruction { target, data: None })?;
-                    return Ok(());
-                }
-                c => return Err(ParseError::UnexpectedCharacter(b'>', c, self.span_single())),
-            }
-        }
-
-        self.consume_whitespace();
-        let data_start = self.pos;
-        loop {
-            if self.is_at_end() {
-                return Err(ParseError::UnexpectedEndOfStream);
-            }
-
-            if let Ok(b'?') = self.current_byte() {
-                let peek = self.peek_byte()?;
-                match peek {
-                    b'>' => {
-                        break;
-                    }
-                    c => return Err(ParseError::UnexpectedCharacter(b'>', c, self.span_single())),
-                }
-            }
-
-            self.advance(1);
-        }
-
-        let data = self.slice(data_start, self.pos);
-        validate::is_xml_chars(data, data_start, self)?;
-
-        self.advance(2);
-        self.emit_token(Token::ProcessingInstruction {
-            target,
-            data: Some(data),
-        })?;
-
-        Ok(())
-    }
-
-    // doctypedecl ::=   '<!DOCTYPE' S Name (S ExternalID)? S? ('[' intSubset ']' S?)? '>'
-    // DeclSep     ::=   PEReference | S [WFC: PE Between Declarations]
-    // intSubset   ::=   (markupdecl | DeclSep)*
-    // markupdecl  ::=   elementdecl | AttlistDecl | EntityDecl | NotationDecl | PI | Comment
-    fn parse_doc_type_decl(&mut self) -> ParseResult<()> {
-        self.advance(9);
-        self.expect_and_consume_whitespace()?;
-
-        let name = self.parse_name()?;
-        self.doc.name = Some(name);
-
-        // TODO: ExternalId
-
-        self.consume_whitespace();
-
-        if let Ok(b'[') = self.current_byte() {
-            self.expect_byte(b'[')?;
-
-            // Parse 'intSubset'
-            loop {
-                // TODO:
-                // - elementdecl
-                // - AttlistDecl
-                // - NotationDecl
-                match self.current_byte()? {
-                    b']' => break,
-                    b'<' if self.starts_with("<!ELEMENT") => self.parse_element_type_decl()?,
-                    b'<' if self.starts_with("<!ENTITY") => self.parse_entity_decl()?,
-                    b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
-                    b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
-                    _ if self.is_white_space()? => self.advance(1),
-                    _ => todo!(),
-                }
-            }
-
-            self.expect_byte(b']')?;
-            self.consume_whitespace();
-        }
-
-        self.expect_byte(b'>')?;
-
-        Ok(())
-    }
-
-    // elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
-    // contentspec  ::=  'EMPTY' | 'ANY' | Mixed | children
-    fn parse_element_type_decl(&mut self) -> ParseResult<()> {
-        self.advance(9);
-
-        let start = self.pos;
-        self.expect_and_consume_whitespace()?;
-        let name = self.parse_name()?;
-
-        if self.expect_and_consume_whitespace().is_err() {
-            return Err(ParseError::InvalidElementTypeDecl(self.span(start + 1, self.pos)));
-        }
-
-        // An element type MUST NOT be declared more than once.
-        if self.element_types.iter().any(|el| el.name == name) {
-            return Err(ParseError::DuplicateElementType(
-                name.to_string(),
-                self.span(start, self.pos - 1),
-            ));
-        }
-
-        if self.peek_seq("EMPTY") {
-            self.element_types.push(ElementTypeDecl {
-                name,
-                content_spec: ContentSpec::Empty,
-            });
-            self.advance(5);
-        } else if self.peek_seq("ANY") {
-            self.element_types.push(ElementTypeDecl {
-                name,
-                content_spec: ContentSpec::Any,
-            });
-            self.advance(3);
-        } else if self.peek_seq("(") {
-            // TODO: Parse 'Mixed' & 'children' content specs
-            self.expect_byte(b'(')?;
-            self.consume_whitespace();
-
-            if self.peek_seq("#PCDATA") {
-                self.parse_mixed_content(name)?;
-            } else {
-                self.parse_element_content()?;
-            }
-        } else {
-            return Err(ParseError::InvalidElementTypeDecl(self.span(start, self.pos)));
-        }
-
-        self.consume_whitespace();
-        self.expect_byte(b'>')?;
-
-        Ok(())
-    }
-
-    // Mixed  ::=  '(' S? '#PCDATA' (S? '|' S? Name)* S? ')*' | '(' S? '#PCDATA' S? ')'
-    fn parse_mixed_content(&mut self, name: &'a str) -> ParseResult<()> {
-        let mut names = vec![];
-
-        let start = self.pos;
-        self.advance(7);
-        names.push(self.slice(start, self.pos));
-
-        self.consume_whitespace();
-
-        loop {
-            match self.current_byte()? {
-                b'|' => {
-                    self.advance(1);
-                    self.consume_whitespace();
-
-                    let name = self.parse_name()?;
-
-                    // The same name MUST NOT appear more than once in a single mixed-content declaration.
-                    if names.contains(&name) {
-                        return Err(ParseError::DuplicateMixedContent(
-                            name.to_string(),
-                            self.span(self.pos - name.len(), self.pos),
-                        ));
-                    }
-
-                    names.push(name);
-                    self.consume_whitespace();
-                }
-                b')' => break,
-                _ => unreachable!(
-                    "this should never happen but you should never say never so it should probably be handled but that is a future me problem"
-                ),
-            }
-        }
-
-        self.expect_byte(b')')?;
-
-        if names.len() > 1 {
-            self.expect_byte(b'*')?;
-        }
-
-        self.element_types.push(ElementTypeDecl {
-            name,
-            content_spec: ContentSpec::MixedContent(names),
-        });
-
-        Ok(())
-    }
-
-    // children     ::=  (choice | seq) ('?' | '*' | '+')?
-    // cp           ::=  (Name | choice | seq) ('?' | '*' | '+')?
-    // choice       ::=  '(' S? cp ( S? '|' S? cp )+ S? ')'         TODO: [VC: Proper Group/PE Nesting]
-    // seq          ::=  '(' S? cp ( S? ',' S? cp )* S? ')'         TODO: [VC: Proper Group/PE Nesting]
-    fn parse_element_content(&mut self) -> ParseResult<()> {
-        // Leading '(' and any whitespace was already consumed
-        match self.current_byte()? {
-            b'%' => self.parse_parameter_entity_ref()?,
-            b'(' => {
-                // Started with a nested content particle
-                self.advance(1);
-                self.parse_element_content()?;
-            }
-            _ => {
-                let name = self.parse_name()?;
-                let repetition = match self.current_byte()? {
-                    b'?' => {
-                        self.advance(1);
-                        Repetition::QuestionMark
-                    }
-                    b'*' => {
-                        self.advance(1);
-                        Repetition::Star
-                    }
-                    b'+' => {
-                        self.advance(1);
-                        Repetition::Plus
-                    }
-                    _ => Repetition::Once,
-                };
-
-                let particle = ElementContentType::Name {
-                    value: name,
-                    repetition,
-                };
-
-                dbg!(&particle);
-            }
-        }
-
-        let mut content_type: Option<ElementContentType> = None;
-        loop {
-            self.consume_whitespace();
-
-            match self.current_byte()? {
-                b'%' => self.parse_parameter_entity_ref()?,
-                b')' => break,
-                b',' => {
-                    match content_type {
-                        None => content_type = Some(ElementContentType::Seq(Vec::new())),
-                        Some(ElementContentType::Choice(_)) => panic!("TODO: Invalid element content sep"),
-                        Some(ElementContentType::Name { .. }) => panic!("TODO: Invalid element content sep"),
-                        Some(ElementContentType::Seq(_)) => {}
-                    }
-                    self.advance(1);
-                }
-
-                b'|' => {
-                    match content_type {
-                        None => content_type = Some(ElementContentType::Choice(Vec::new())),
-                        Some(ElementContentType::Seq(_)) => panic!("TODO: Invalid element content sep"),
-                        Some(ElementContentType::Name { .. }) => panic!("TODO: Invalid element content sep"),
-                        Some(ElementContentType::Choice(_)) => {}
-                    }
-                    self.advance(1);
-                }
-                b'(' => {
-                    self.advance(1);
-                    self.parse_element_content()?;
-                }
-                _ => {
-                    let name = self.parse_name()?;
-                    let repetition = match self.current_byte()? {
-                        b'?' => {
-                            self.advance(1);
-                            Repetition::QuestionMark
-                        }
-                        b'*' => {
-                            self.advance(1);
-                            Repetition::Star
-                        }
-                        b'+' => {
-                            self.advance(1);
-                            Repetition::Plus
-                        }
-                        _ => Repetition::Once,
-                    };
-
-                    let particle = ElementContentType::Name {
-                        value: name,
-                        repetition,
-                    };
-
-                    dbg!(&particle);
-                }
-            }
-        }
-
-        self.expect_byte(b')')?;
-        let repetition = match self.current_byte()? {
-            b'?' => {
-                self.advance(1);
-                Repetition::QuestionMark
-            }
-            b'*' => {
-                self.advance(1);
-                Repetition::Star
-            }
-            b'+' => {
-                self.advance(1);
-                Repetition::Plus
-            }
-            _ => Repetition::Once,
-        };
-
-        dbg!(repetition);
-
-        Ok(())
-    }
-
-    fn parse_parameter_entity_ref(&mut self) -> ParseResult<()> {
-        // TODO: Something with me
-        self.expect_byte(b'%')?;
-        let _name = self.parse_name()?;
-        self.expect_byte(b';')?;
-        Ok(())
-    }
-
-    // EntityDecl  ::=  GEDecl | PEDecl
-    // GEDecl      ::=  '<!ENTITY' S Name S EntityDef S? '>'
-    // PEDecl      ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
-    // EntityDef   ::=  EntityValue | (ExternalID NDataDecl?)
-    // PEDef       ::=  EntityValue | ExternalID
-    fn parse_entity_decl(&mut self) -> ParseResult<()> {
-        self.advance(8);
-        self.expect_and_consume_whitespace()?;
-
-        let name = self.parse_name()?;
-        self.expect_and_consume_whitespace()?;
-        let value = match self.current_byte()? {
-            b'\'' | b'"' => self.parse_entity_value(name)?,
-            b => return Err(ParseError::UnexpectedCharacter2("`'` or `\"`", b, self.span_single())),
-        };
-
-        self.expect_byte(b'>')?;
-
-        // TODO: Does this need to be an error?
-        // If the same entity is declared more than once, the first declaration encountered is binding
-        if self.entities.iter().any(|entity| entity.name == name) {
-            return Ok(());
-        }
-
-        self.entities.push(Entity { name, value });
-
-        Ok(())
-    }
-
-    // EntityValue  ::=  '"' ([^%&"] | PEReference | Reference)* '"' |  "'" ([^%&'] | PEReference | Reference)* "'"
-    fn parse_entity_value(&mut self, _name: &'a str) -> ParseResult<&'a str> {
-        let delimiter = self.consume_quote()?;
-        let start = self.pos;
-
-        // TODO: Parse references and recursion detection
-        //  - A parsed entity MUST NOT contain a recursive reference to itself, either directly or indirectly.
-        loop {
-            match self.current_byte()? {
-                d if d == delimiter => break,
-                _ => self.advance(1),
-            }
-        }
-
-        self.advance(1);
-        let value = self.slice(start, self.pos);
-
-        Ok(value)
-    }
-
-    fn parse_element(&mut self, kind: ElementType) -> ParseResult<()> {
-        let start = self.pos;
-        let element_start = self.parse_element_start()?;
-
-        if let Some(doc_name) = self.doc.name
-            && let ElementType::Root = kind
-            && let Token::ElementStart { local, .. } = element_start
-            && doc_name != local
-        {
-            return Err(ParseError::InvalidRootName(
-                doc_name.to_string(),
-                local.to_string(),
-                self.span(start + 1, self.pos),
-            ));
-        }
-
-        self.emit_token(element_start)?;
-
-        let mut is_open = false;
-        while !self.is_at_end() {
-            match self.unchecked_current_byte() {
-                b'>' => {
-                    self.emit_token(Token::ElementEnd {
-                        kind: ElementEndKind::Open,
-                    })?;
-                    self.advance(1);
-                    is_open = true;
-                    break;
-                }
-                b'/' => {
-                    self.advance(1);
-                    self.expect_byte(b'>')?;
-                    self.emit_token(Token::ElementEnd {
-                        kind: ElementEndKind::Empty,
-                    })?;
-                    break;
-                }
-                _ => {
-                    // Attributes need a leading white space
-                    if !self.is_white_space()? {
-                        return Err(ParseError::UnexpectedCharacter2(
-                            "a space",
-                            self.unchecked_current_byte(),
-                            self.span_single(),
-                        ));
-                    }
-                    self.consume_whitespace();
-
-                    let attribute = self.parse_attribute()?;
-                    self.emit_token(attribute)?;
-                }
-            }
-        }
-
-        if is_open {
-            self.parse_content()?;
-        }
-
-        Ok(())
-    }
-
-    // STag ::= '<' QName (S Attribute)* S? '>'
-    //          ^^^^^^^^^
-    fn parse_element_start(&mut self) -> ParseResult<Token<'a>> {
-        let start = self.pos;
-        self.advance(1);
-
-        if self.is_white_space()? {
-            return Err(ParseError::InvalidXmlName(self.span_single()));
-        }
-
-        let (prefix, local) = self.parse_qname()?;
-
-        if let Some(prefix) = prefix
-            && prefix == XMLNS_PREFIX
-        {
-            return Err(ParseError::ReservedPrefix(self.span(start, self.pos)));
-        }
-
-        Ok(Token::ElementStart { prefix, local })
-    }
-
-    // Attribute  ::=  NSAttName Eq AttValue | QName Eq AttValue
-    // AttValue   ::=  '"' ([^<&"] | Reference)* '"'
-    //              |  "'" ([^<&'] | Reference)* "'"
-    fn parse_attribute(&mut self) -> ParseResult<Token<'a>> {
-        let (prefix, local) = self.parse_qname()?;
-        self.consume_whitespace();
-        self.expect_byte(b'=')?;
-        self.consume_whitespace();
-        let value = self.parse_attribute_value()?;
-        Ok(Token::Attribute { prefix, local, value })
-    }
-
-    fn parse_attribute_value(&mut self) -> ParseResult<&'a str> {
-        let delimiter = self.consume_quote()?;
-        let start = self.pos;
-
-        loop {
-            match self.current_byte() {
-                Ok(d) if d == delimiter => break,
-                Ok(c) if c == b'<' || c == b'&' => {
-                    // TODO: Handle Character/Entity references
-                    return Err(ParseError::UnexpectedCharacter(delimiter, c, self.span_single()));
-                }
-                Ok(_) => self.advance(1),
-                Err(err) => return Err(err),
-            }
-        }
-
-        self.advance(1);
-        Ok(self.slice(start, self.pos - 1))
-    }
-
-    // ETag  ::=  '</' QName S? '>'
-    fn parse_element_end(&mut self) -> ParseResult<()> {
-        self.advance(2);
-
-        if self.is_white_space()? {
-            return Err(ParseError::InvalidXmlName(self.span_single()));
-        }
-
-        let (prefix, local) = self.parse_qname()?;
-        self.expect_byte(b'>')?;
-
-        self.emit_token(Token::ElementEnd {
-            kind: ElementEndKind::Close { prefix, local },
-        })?;
-
-        Ok(())
-    }
-
-    // QName           ::=  PrefixedName | UnprefixedName
-    // PrefixedName    ::=  Prefix ':' LocalPart
-    // UnprefixedName  ::=  LocalPart
-    // Prefix          ::=  NCName
-    // LocalPart       ::=  NCName
-    // NCName          ::=  Name - (Char* ':' Char*) /* An XML Name, minus the ":" */
-    fn parse_qname(&mut self) -> ParseResult<(Option<&'a str>, &'a str)> {
-        let start = self.pos;
-
-        let local = self.parse_nc_name()?;
-
-        if self.current_byte()? != b':' {
-            if local.is_empty() {
-                return Err(ParseError::InvalidXmlName(self.span_single()));
-            }
-            return Ok((None, local));
-        }
-
-        let prefix = local;
-        if prefix.is_empty() {
-            return Err(ParseError::InvalidXmlName(self.span_single()));
-        }
-
-        // 'xml' prefix will be mapped to 'http://www.w3.org/XML/1998/namespace'
-        if prefix != XML_PREFIX && !self.has_prefix(prefix) {
-            return Err(ParseError::UnknownPrefix(prefix.to_owned(), self.span(start, self.pos)));
-        }
-
-        self.expect_byte(b':')?;
-
-        let local = self.parse_nc_name()?;
-        if local.is_empty() {
-            return Err(ParseError::InvalidXmlName(self.span_single()));
-        }
-
-        Ok((Some(prefix), local))
-    }
-
-    // content  ::=  CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
-    fn parse_content(&mut self) -> ParseResult<()> {
-        while !self.is_at_end() {
-            match self.unchecked_current_byte() {
-                b'<' if self.starts_with("<?") => self.parse_processing_instruction()?,
-                b'<' if self.starts_with("<![CDATA[") => self.parse_cdata()?,
-                b'<' if self.starts_with("<!-- ") => self.parse_comment()?,
-                b'<' if self.starts_with("</") => {
-                    self.parse_element_end()?;
-                    break;
-                }
-                b'<' => self.parse_element(ElementType::Child)?,
-                _ => {
-                    if self.is_white_space()? {
-                        self.advance(1);
-                    } else {
-                        self.parse_text()?;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    // CDSect   ::=  CDStart CData CDEnd
-    // CDStart  ::=  '<![CDATA['
-    // CData    ::=  (Char* - (Char* ']]>' Char*))
-    // CDEnd    ::=  ']]>'
-    fn parse_cdata(&mut self) -> ParseResult<()> {
-        self.advance(9);
-        let start = self.pos;
-
-        loop {
-            if self.is_at_end() {
-                return Err(ParseError::UnexpectedEndOfStream);
-            }
-
-            if self.unchecked_current_byte() == b']' && self.peek_seq("]]>") {
-                break;
-            }
-
-            self.advance(1);
-        }
-
-        let end = self.pos;
-        let data = &self.source[start..end];
-
-        validate::is_xml_chars(data, start, self)?;
-
-        self.advance(3);
-        self.emit_token(Token::CData { data })?;
-
-        Ok(())
-    }
-
-    fn parse_text(&mut self) -> ParseResult<()> {
-        let start = self.pos;
-
-        loop {
-            match self.current_byte() {
-                Ok(b'<') => break,
-                Ok(_) => self.advance(1),
-                Err(err) => return Err(err),
-            }
-        }
-
-        let text = self.slice(start, self.pos);
-        if text.contains("]]>") {
-            let pos = text.find("]]>").expect("text to contain ]]>");
-            let start = start + pos;
-            return Err(ParseError::InvalidCharData(self.span(start, start + 3)));
-        }
-        self.emit_token(Token::Text { text })?;
-
-        Ok(())
-    }
-
-    fn parse_comment(&mut self) -> ParseResult<()> {
-        let start = self.pos;
-
-        self.advance(5);
-        loop {
-            if self.is_at_end() {
-                return Err(ParseError::UnexpectedEndOfStream);
-            }
-
-            if let Ok(b'\n') = self.current_byte() {
-                let span = self.span(start, self.pos);
-                return Err(ParseError::InvalidComment(String::from("unclosed comment"), span));
-            }
-
-            // For compatibility, the string "--" (double-hyphen) must not occur within comments.
-            if self.unchecked_current_byte() == b'-' && self.peek_seq("--") {
-                if self.peek_seq("-->") {
-                    break;
-                }
-
-                let span = self.span(start, self.pos + 2);
-                return Err(ParseError::InvalidComment(
-                    String::from("double-hyphens (--) are not allowed inside comments"),
-                    span,
-                ));
-            }
-
-            self.advance(1);
-        }
-
-        self.advance(3);
-        let comment = self.slice(start, self.pos);
-        validate::is_xml_chars(comment, start, self)?;
-        self.emit_token(Token::Comment { comment })?;
-
-        Ok(())
     }
 
     fn emit_token(&mut self, token: Token<'a>) -> ParseResult<()> {
@@ -1939,6 +1078,861 @@ impl<'a> TokenStream<'a> {
     }
 }
 
+fn parse_name<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
+    let start = stream.pos;
+
+    let current = stream.current_char()?;
+    if !validate::is_name_start_char(current) {
+        return Err(ParseError::InvalidXmlName(stream.span_single()));
+    }
+
+    stream.advance(current.len_utf8());
+
+    loop {
+        let c = stream.current_char()?;
+        if !validate::is_name_char(c) {
+            break;
+        }
+        stream.advance(c.len_utf8());
+    }
+
+    let name = stream.slice(start, stream.pos);
+    validate::is_valid_name(name, start, stream)?;
+
+    Ok(name)
+}
+
+fn parse_nc_name<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
+    let start = stream.pos;
+
+    let current = stream.current_char()?;
+    if !validate::is_name_start_char(current) || current == ':' {
+        return Err(ParseError::InvalidXmlName(stream.span_single()));
+    }
+    stream.advance(current.len_utf8());
+
+    loop {
+        let c = stream.current_char()?;
+        if !validate::is_name_char(c) || c == ':' {
+            break;
+        }
+        stream.advance(c.len_utf8());
+    }
+
+    let name = stream.slice(start, stream.pos);
+    validate::is_valid_name(name, start, stream)?;
+
+    Ok(name)
+}
+
+/// Parses the source input, emitting a stream of tokens to build up the
+/// resulting `Document`
+///
+/// Document  ::=  prolog element Misc*
+fn parse_document<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    parse_prolog(stream)?;
+
+    // Parse any comments, PIs, or whitespace before the root element
+    while !stream.is_at_end() {
+        match stream.unchecked_current_byte() {
+            b' ' | b'\t' | b'\n' | b'\r' => {
+                stream.advance(1);
+            }
+            b'<' if stream.starts_with("<?") => parse_processing_instruction(stream)?,
+            b'<' if stream.starts_with("<!-- ") => parse_comment(stream)?,
+            // Start of the root node, break and parse outside of the loop.
+            b'<' => break,
+            _ => return Err(ParseError::WTF(stream.span_single())),
+        }
+    }
+
+    stream.consume_whitespace();
+
+    if stream.is_at_end() {
+        return Err(ParseError::MissingRoot);
+    }
+
+    parse_element(stream, ElementType::Root)?;
+
+    if !stream.temp_elements.is_empty() {
+        return Err(ParseError::UnclosedRoot);
+    }
+
+    // Parse any comments or PIs after the root node
+    parse_misc(stream)?;
+
+    if !stream.is_at_end() {
+        return Err(ParseError::UnexpectedElement(stream.span(stream.pos, stream.pos + 1)));
+    }
+
+    Ok(())
+}
+
+// prolog  ::=  XMLDecl? Misc* (doctypedecl Misc*)?
+fn parse_prolog<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    // There can only be one XML declaration, and it must be at the absolute start
+    // of the Document, i.e., no characters are allowed before it (including whitespace)
+    if stream.starts_with("<?xml ") {
+        parse_xml_decl(stream)?;
+    }
+
+    parse_misc(stream)?;
+
+    if stream.peek_seq("<!DOCTYPE") {
+        parse_doc_type_decl(stream)?;
+        parse_misc(stream)?;
+    }
+
+    Ok(())
+}
+
+// Misc  ::=  Comment | PI | S
+fn parse_misc<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    while !stream.is_at_end() {
+        match stream.unchecked_current_byte() {
+            b' ' | b'\t' | b'\n' | b'\r' => stream.advance(1),
+            b'<' if stream.starts_with("<?") => parse_processing_instruction(stream)?,
+            b'<' if stream.starts_with("<!-- ") => parse_comment(stream)?,
+            _ => break,
+        }
+    }
+
+    Ok(())
+}
+
+// XMLDecl       ::=   '<?xml' VersionInfo EncodingDecl? SDDecl? S? '?>'
+// VersionInfo   ::=   S 'version' Eq ("'" VersionNum "'" | '"' VersionNum '"')
+// Eq            ::=   S? '=' S?
+// VersionNum    ::=   '1.' [0-9]+
+// EncodingDecl  ::=   S 'encoding' Eq ('"' EncName '"' | "'" EncName "'" )
+// EncName       ::=   [A-Za-z] ([A-Za-z0-9._] | '-')* /* Encoding name contains only Latin characters */
+// SDDecl        ::=   S 'standalone' Eq (("'" ('yes' | 'no') "'") | ('"' ('yes' | 'no') '"')) [VC: Standalone Document Declaration]
+fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    stream.advance(5);
+    stream.consume_whitespace();
+
+    if !stream.peek_seq("version") {
+        return Err(ParseError::InvalidDeclaration(
+            String::from("version attribute"),
+            stream.span(stream.pos, stream.pos + 1),
+        ));
+    }
+
+    stream.advance(7);
+    stream.consume_whitespace();
+    stream.expect_byte(b'=')?;
+    stream.consume_whitespace();
+
+    let version = parse_attribute_value(stream)?;
+
+    stream.consume_whitespace();
+    let encoding = if stream.starts_with("encoding") {
+        stream.advance(8);
+        stream.expect_byte(b'=')?;
+        Some(parse_attribute_value(stream)?)
+    } else {
+        None
+    };
+
+    stream.consume_whitespace();
+    let standalone = if stream.peek_seq("standalone") {
+        let start = stream.pos;
+        stream.advance(10);
+        stream.expect_byte(b'=')?;
+
+        let value = parse_attribute_value(stream)?;
+        if value == "yes" || value == "no" {
+            Some(value)
+        } else {
+            return Err(ParseError::InvalidStandalone(
+                value.to_owned(),
+                stream.span(start, stream.pos),
+            ));
+        }
+    } else {
+        None
+    };
+
+    // TODO: While it is valid for the declaration to span multiple lines, if there is no '?>'
+    // and the next non-whitespace character is the next element, the diagnostics will report
+    // the incorrect source line.
+    stream.consume_whitespace();
+    if !stream.peek_seq("?>") {
+        return Err(ParseError::InvalidDeclaration(
+            String::from("?>"),
+            stream.span(stream.pos, stream.pos + 1),
+        ));
+    }
+
+    stream.advance(2);
+    stream.emit_token(Token::Declaration {
+        version,
+        encoding,
+        standalone,
+    })?;
+
+    Ok(())
+}
+
+// PI        ::=   '<?' PITarget  (S (Char* - ( Char* '?>' Char*)))? '?>'
+// PITarget  ::=   Name - (('X' | 'x') ('M' | 'm') ('L' | 'l'))
+fn parse_processing_instruction<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    if stream.starts_with("<?xml ") {
+        return Err(ParseError::UnexpectedDeclaration(
+            stream.span(stream.pos, stream.pos + 1),
+        ));
+    }
+
+    stream.advance(2);
+    let target = parse_name(stream)?;
+
+    if let Ok(b'?') = stream.current_byte() {
+        let peek = stream.peek_byte()?;
+        match peek {
+            b'>' => {
+                stream.advance(2);
+                stream.emit_token(Token::ProcessingInstruction { target, data: None })?;
+                return Ok(());
+            }
+            c => return Err(ParseError::UnexpectedCharacter(b'>', c, stream.span_single())),
+        }
+    }
+
+    stream.consume_whitespace();
+    let data_start = stream.pos;
+    loop {
+        if stream.is_at_end() {
+            return Err(ParseError::UnexpectedEndOfStream);
+        }
+
+        if let Ok(b'?') = stream.current_byte() {
+            let peek = stream.peek_byte()?;
+            match peek {
+                b'>' => {
+                    break;
+                }
+                c => return Err(ParseError::UnexpectedCharacter(b'>', c, stream.span_single())),
+            }
+        }
+
+        stream.advance(1);
+    }
+
+    let data = stream.slice(data_start, stream.pos);
+    validate::is_xml_chars(data, data_start, stream)?;
+
+    stream.advance(2);
+    stream.emit_token(Token::ProcessingInstruction {
+        target,
+        data: Some(data),
+    })?;
+
+    Ok(())
+}
+
+// doctypedecl ::=   '<!DOCTYPE' S Name (S ExternalID)? S? ('[' intSubset ']' S?)? '>'
+// DeclSep     ::=   PEReference | S [WFC: PE Between Declarations]
+// intSubset   ::=   (markupdecl | DeclSep)*
+// markupdecl  ::=   elementdecl | AttlistDecl | EntityDecl | NotationDecl | PI | Comment
+fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    stream.advance(9);
+    stream.expect_and_consume_whitespace()?;
+
+    let name = parse_name(stream)?;
+    stream.doc.name = Some(name);
+
+    // TODO: ExternalId
+
+    stream.consume_whitespace();
+
+    if let Ok(b'[') = stream.current_byte() {
+        stream.expect_byte(b'[')?;
+
+        // Parse 'intSubset'
+        loop {
+            // TODO:
+            // - elementdecl
+            // - AttlistDecl
+            // - NotationDecl
+            match stream.current_byte()? {
+                b']' => break,
+                b'<' if stream.starts_with("<!ELEMENT") => parse_element_type_decl(stream)?,
+                b'<' if stream.starts_with("<!ENTITY") => parse_entity_decl(stream)?,
+                b'<' if stream.starts_with("<?") => parse_processing_instruction(stream)?,
+                b'<' if stream.starts_with("<!-- ") => parse_comment(stream)?,
+                _ if stream.is_white_space()? => stream.advance(1),
+                _ => todo!(),
+            }
+        }
+
+        stream.expect_byte(b']')?;
+        stream.consume_whitespace();
+    }
+
+    stream.expect_byte(b'>')?;
+
+    Ok(())
+}
+
+// elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
+// contentspec  ::=  'EMPTY' | 'ANY' | Mixed | children
+fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    stream.advance(9);
+
+    let start = stream.pos;
+    stream.expect_and_consume_whitespace()?;
+    let name = parse_name(stream)?;
+
+    if stream.expect_and_consume_whitespace().is_err() {
+        return Err(ParseError::InvalidElementTypeDecl(stream.span(start + 1, stream.pos)));
+    }
+
+    // An element type MUST NOT be declared more than once.
+    if stream.element_types.iter().any(|el| el.name == name) {
+        return Err(ParseError::DuplicateElementType(
+            name.to_string(),
+            stream.span(start, stream.pos - 1),
+        ));
+    }
+
+    if stream.peek_seq("EMPTY") {
+        stream.element_types.push(ElementTypeDecl {
+            name,
+            content_spec: ContentSpec::Empty,
+        });
+        stream.advance(5);
+    } else if stream.peek_seq("ANY") {
+        stream.element_types.push(ElementTypeDecl {
+            name,
+            content_spec: ContentSpec::Any,
+        });
+        stream.advance(3);
+    } else if stream.peek_seq("(") {
+        // TODO: Parse 'Mixed' & 'children' content specs
+        stream.expect_byte(b'(')?;
+        stream.consume_whitespace();
+
+        if stream.peek_seq("#PCDATA") {
+            parse_mixed_content(stream, name)?;
+        } else {
+            let content = parse_element_content(stream)?;
+            dbg!(content);
+        }
+    } else {
+        return Err(ParseError::InvalidElementTypeDecl(stream.span(start, stream.pos)));
+    }
+
+    stream.consume_whitespace();
+    stream.expect_byte(b'>')?;
+
+    Ok(())
+}
+
+// Mixed  ::=  '(' S? '#PCDATA' (S? '|' S? Name)* S? ')*' | '(' S? '#PCDATA' S? ')'
+fn parse_mixed_content<'a>(stream: &mut TokenStream<'a>, name: &'a str) -> ParseResult<()> {
+    let mut names = vec![];
+
+    let start = stream.pos;
+    stream.advance(7);
+    names.push(stream.slice(start, stream.pos));
+
+    stream.consume_whitespace();
+
+    loop {
+        match stream.current_byte()? {
+            b'|' => {
+                stream.advance(1);
+                stream.consume_whitespace();
+
+                let name = parse_name(stream)?;
+
+                // The same name MUST NOT appear more than once in a single mixed-content declaration.
+                if names.contains(&name) {
+                    return Err(ParseError::DuplicateMixedContent(
+                        name.to_string(),
+                        stream.span(stream.pos - name.len(), stream.pos),
+                    ));
+                }
+
+                names.push(name);
+                stream.consume_whitespace();
+            }
+            b')' => break,
+            _ => unreachable!(
+                "this should never happen but you should never say never so it should probably be handled but that is a future me problem"
+            ),
+        }
+    }
+
+    stream.expect_byte(b')')?;
+
+    if names.len() > 1 {
+        stream.expect_byte(b'*')?;
+    }
+
+    stream.element_types.push(ElementTypeDecl {
+        name,
+        content_spec: ContentSpec::MixedContent(names),
+    });
+
+    Ok(())
+}
+
+fn parse_parameter_entity_ref<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    // TODO: Something with me
+    stream.expect_byte(b'%')?;
+    let _name = parse_name(stream)?;
+    stream.expect_byte(b';')?;
+    Ok(())
+}
+
+// EntityDecl  ::=  GEDecl | PEDecl
+// GEDecl      ::=  '<!ENTITY' S Name S EntityDef S? '>'
+// PEDecl      ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
+// EntityDef   ::=  EntityValue | (ExternalID NDataDecl?)
+// PEDef       ::=  EntityValue | ExternalID
+fn parse_entity_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    stream.advance(8);
+    stream.expect_and_consume_whitespace()?;
+
+    let name = parse_name(stream)?;
+    stream.expect_and_consume_whitespace()?;
+    let value = match stream.current_byte()? {
+        b'\'' | b'"' => parse_entity_value(stream, name)?,
+        b => return Err(ParseError::UnexpectedCharacter2("`'` or `\"`", b, stream.span_single())),
+    };
+
+    stream.expect_byte(b'>')?;
+
+    // TODO: Does this need to be an error?
+    // If the same entity is declared more than once, the first declaration encountered is binding
+    if stream.entities.iter().any(|entity| entity.name == name) {
+        return Ok(());
+    }
+
+    stream.entities.push(Entity { name, value });
+
+    Ok(())
+}
+
+// EntityValue  ::=  '"' ([^%&"] | PEReference | Reference)* '"' |  "'" ([^%&'] | PEReference | Reference)* "'"
+fn parse_entity_value<'a>(stream: &mut TokenStream<'a>, _name: &'a str) -> ParseResult<&'a str> {
+    let delimiter = stream.consume_quote()?;
+    let start = stream.pos;
+
+    // TODO: Parse references and recursion detection
+    //  - A parsed entity MUST NOT contain a recursive reference to it either directly or indirectly.
+    loop {
+        match stream.current_byte()? {
+            d if d == delimiter => break,
+            _ => stream.advance(1),
+        }
+    }
+
+    stream.advance(1);
+    let value = stream.slice(start, stream.pos);
+
+    Ok(value)
+}
+
+fn parse_element<'a>(stream: &mut TokenStream<'a>, kind: ElementType) -> ParseResult<()> {
+    let start = stream.pos;
+    let element_start = parse_element_start(stream)?;
+
+    if let Some(doc_name) = stream.doc.name
+        && let ElementType::Root = kind
+        && let Token::ElementStart { local, .. } = element_start
+        && doc_name != local
+    {
+        return Err(ParseError::InvalidRootName(
+            doc_name.to_string(),
+            local.to_string(),
+            stream.span(start + 1, stream.pos),
+        ));
+    }
+
+    stream.emit_token(element_start)?;
+
+    let mut is_open = false;
+    while !stream.is_at_end() {
+        match stream.unchecked_current_byte() {
+            b'>' => {
+                stream.emit_token(Token::ElementEnd {
+                    kind: ElementEndKind::Open,
+                })?;
+                stream.advance(1);
+                is_open = true;
+                break;
+            }
+            b'/' => {
+                stream.advance(1);
+                stream.expect_byte(b'>')?;
+                stream.emit_token(Token::ElementEnd {
+                    kind: ElementEndKind::Empty,
+                })?;
+                break;
+            }
+            _ => {
+                // Attributes need a leading white space
+                if !stream.is_white_space()? {
+                    return Err(ParseError::UnexpectedCharacter2(
+                        "a space",
+                        stream.unchecked_current_byte(),
+                        stream.span_single(),
+                    ));
+                }
+                stream.consume_whitespace();
+
+                let attribute = parse_attribute(stream)?;
+                stream.emit_token(attribute)?;
+            }
+        }
+    }
+
+    if is_open {
+        parse_content(stream)?;
+    }
+
+    Ok(())
+}
+
+// STag ::= '<' QName (S Attribute)* S? '>'
+//          ^^^^^^^^^
+fn parse_element_start<'a>(stream: &mut TokenStream<'a>) -> ParseResult<Token<'a>> {
+    let start = stream.pos;
+    stream.advance(1);
+
+    if stream.is_white_space()? {
+        return Err(ParseError::InvalidXmlName(stream.span_single()));
+    }
+
+    let (prefix, local) = parse_qname(stream)?;
+
+    if let Some(prefix) = prefix
+        && prefix == XMLNS_PREFIX
+    {
+        return Err(ParseError::ReservedPrefix(stream.span(start, stream.pos)));
+    }
+
+    Ok(Token::ElementStart { prefix, local })
+}
+
+// Attribute  ::=  NSAttName Eq AttValue | QName Eq AttValue
+// AttValue   ::=  '"' ([^<&"] | Reference)* '"'
+//              |  "'" ([^<&'] | Reference)* "'"
+fn parse_attribute<'a>(stream: &mut TokenStream<'a>) -> ParseResult<Token<'a>> {
+    let (prefix, local) = parse_qname(stream)?;
+    stream.consume_whitespace();
+    stream.expect_byte(b'=')?;
+    stream.consume_whitespace();
+    let value = parse_attribute_value(stream)?;
+    Ok(Token::Attribute { prefix, local, value })
+}
+
+fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
+    let delimiter = stream.consume_quote()?;
+    let start = stream.pos;
+
+    loop {
+        match stream.current_byte() {
+            Ok(d) if d == delimiter => break,
+            Ok(c) if c == b'<' || c == b'&' => {
+                // TODO: Handle Character/Entity references
+                return Err(ParseError::UnexpectedCharacter(delimiter, c, stream.span_single()));
+            }
+            Ok(_) => stream.advance(1),
+            Err(err) => return Err(err),
+        }
+    }
+
+    stream.advance(1);
+    Ok(stream.slice(start, stream.pos - 1))
+}
+
+// ETag  ::=  '</' QName S? '>'
+fn parse_element_end<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    stream.advance(2);
+
+    if stream.is_white_space()? {
+        return Err(ParseError::InvalidXmlName(stream.span_single()));
+    }
+
+    let (prefix, local) = parse_qname(stream)?;
+    stream.expect_byte(b'>')?;
+
+    stream.emit_token(Token::ElementEnd {
+        kind: ElementEndKind::Close { prefix, local },
+    })?;
+
+    Ok(())
+}
+
+// QName           ::=  PrefixedName | UnprefixedName
+// PrefixedName    ::=  Prefix ':' LocalPart
+// UnprefixedName  ::=  LocalPart
+// Prefix          ::=  NCName
+// LocalPart       ::=  NCName
+// NCName          ::=  Name - (Char* ':' Char*) /* An XML Name, minus the ":" */
+fn parse_qname<'a>(stream: &mut TokenStream<'a>) -> ParseResult<(Option<&'a str>, &'a str)> {
+    let start = stream.pos;
+
+    let local = parse_nc_name(stream)?;
+
+    if stream.current_byte()? != b':' {
+        if local.is_empty() {
+            return Err(ParseError::InvalidXmlName(stream.span_single()));
+        }
+        return Ok((None, local));
+    }
+
+    let prefix = local;
+    if prefix.is_empty() {
+        return Err(ParseError::InvalidXmlName(stream.span_single()));
+    }
+
+    // 'xml' prefix will be mapped to 'http://www.w3.org/XML/1998/namespace'
+    if prefix != XML_PREFIX && !stream.has_prefix(prefix) {
+        return Err(ParseError::UnknownPrefix(
+            prefix.to_owned(),
+            stream.span(start, stream.pos),
+        ));
+    }
+
+    stream.expect_byte(b':')?;
+
+    let local = parse_nc_name(stream)?;
+    if local.is_empty() {
+        return Err(ParseError::InvalidXmlName(stream.span_single()));
+    }
+
+    Ok((Some(prefix), local))
+}
+
+// content  ::=  CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
+fn parse_content<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    while !stream.is_at_end() {
+        match stream.unchecked_current_byte() {
+            b'<' if stream.starts_with("<?") => parse_processing_instruction(stream)?,
+            b'<' if stream.starts_with("<![CDATA[") => parse_cdata(stream)?,
+            b'<' if stream.starts_with("<!-- ") => parse_comment(stream)?,
+            b'<' if stream.starts_with("</") => {
+                parse_element_end(stream)?;
+                break;
+            }
+            b'<' => parse_element(stream, ElementType::Child)?,
+            _ => {
+                if stream.is_white_space()? {
+                    stream.advance(1);
+                } else {
+                    parse_text(stream)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// CDSect   ::=  CDStart CData CDEnd
+// CDStart  ::=  '<![CDATA['
+// CData    ::=  (Char* - (Char* ']]>' Char*))
+// CDEnd    ::=  ']]>'
+fn parse_cdata<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    stream.advance(9);
+    let start = stream.pos;
+
+    loop {
+        if stream.is_at_end() {
+            return Err(ParseError::UnexpectedEndOfStream);
+        }
+
+        if stream.unchecked_current_byte() == b']' && stream.peek_seq("]]>") {
+            break;
+        }
+
+        stream.advance(1);
+    }
+
+    let end = stream.pos;
+    let data = &stream.source[start..end]; // TODO: slice
+
+    validate::is_xml_chars(data, start, stream)?;
+
+    stream.advance(3);
+    stream.emit_token(Token::CData { data })?;
+
+    Ok(())
+}
+
+fn parse_text<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    let start = stream.pos;
+
+    loop {
+        match stream.current_byte() {
+            Ok(b'<') => break,
+            Ok(_) => stream.advance(1),
+            Err(err) => return Err(err),
+        }
+    }
+
+    let text = stream.slice(start, stream.pos);
+    if text.contains("]]>") {
+        let pos = text.find("]]>").expect("text to contain ]]>");
+        let start = start + pos;
+        return Err(ParseError::InvalidCharData(stream.span(start, start + 3)));
+    }
+    stream.emit_token(Token::Text { text })?;
+
+    Ok(())
+}
+
+fn parse_comment<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    let start = stream.pos;
+
+    stream.advance(5);
+    loop {
+        if stream.is_at_end() {
+            return Err(ParseError::UnexpectedEndOfStream);
+        }
+
+        if let Ok(b'\n') = stream.current_byte() {
+            let span = stream.span(start, stream.pos);
+            return Err(ParseError::InvalidComment(String::from("unclosed comment"), span));
+        }
+
+        // For compatibility, the string "--" (double-hyphen) must not occur within comments.
+        if stream.unchecked_current_byte() == b'-' && stream.peek_seq("--") {
+            if stream.peek_seq("-->") {
+                break;
+            }
+
+            let span = stream.span(start, stream.pos + 2);
+            return Err(ParseError::InvalidComment(
+                String::from("double-hyphens (--) are not allowed inside comments"),
+                span,
+            ));
+        }
+
+        stream.advance(1);
+    }
+
+    stream.advance(3);
+    let comment = stream.slice(start, stream.pos);
+    validate::is_xml_chars(comment, start, stream)?;
+    stream.emit_token(Token::Comment { comment })?;
+
+    Ok(())
+}
+
+// children     ::=  (choice | seq) ('?' | '*' | '+')?
+// cp           ::=  (Name | choice | seq) ('?' | '*' | '+')?
+// choice       ::=  '(' S? cp ( S? '|' S? cp )+ S? ')'         TODO: [VC: Proper Group/PE Nesting]
+// seq          ::=  '(' S? cp ( S? ',' S? cp )* S? ')'         TODO: [VC: Proper Group/PE Nesting]
+fn parse_element_content<'a>(stream: &mut TokenStream<'a>) -> ParseResult<Vec<ElementContentType<'a>>> {
+    let mut content = Vec::new();
+    // Leading '(' and any whitespace was already consumed
+    match stream.current_byte()? {
+        b'%' => parse_parameter_entity_ref(stream)?,
+        b'(' => {
+            // Started with a nested content particle
+            stream.advance(1);
+            content.extend(parse_element_content(stream)?);
+        }
+        _ => {
+            let name = parse_name(stream)?;
+            let repetition = match stream.current_byte()? {
+                b'?' => {
+                    stream.advance(1);
+                    Repetition::QuestionMark
+                }
+                b'*' => {
+                    stream.advance(1);
+                    Repetition::Star
+                }
+                b'+' => {
+                    stream.advance(1);
+                    Repetition::Plus
+                }
+                _ => Repetition::Once,
+            };
+
+            content.push(ElementContentType::Name { name, repetition });
+        }
+    }
+
+    let mut content_type: Option<ElementContentType> = None;
+    loop {
+        stream.consume_whitespace();
+
+        match stream.current_byte()? {
+            b'%' => parse_parameter_entity_ref(stream)?,
+            b')' => break,
+            b',' => {
+                match content_type {
+                    None => content_type = Some(ElementContentType::Seq(Vec::new())),
+                    Some(ElementContentType::Choice(_)) => panic!("TODO: Invalid element content sep"),
+                    Some(ElementContentType::Name { .. }) => panic!("TODO: Invalid element content sep"),
+                    Some(ElementContentType::Seq(_)) => {}
+                }
+                stream.advance(1);
+            }
+
+            b'|' => {
+                match content_type {
+                    None => content_type = Some(ElementContentType::Choice(Vec::new())),
+                    Some(ElementContentType::Seq(_)) => panic!("TODO: Invalid element content sep"),
+                    Some(ElementContentType::Name { .. }) => panic!("TODO: Invalid element content sep"),
+                    Some(ElementContentType::Choice(_)) => {}
+                }
+                stream.advance(1);
+            }
+            b'(' => {
+                stream.advance(1);
+                content.extend(parse_element_content(stream)?);
+            }
+            _ => {
+                let name = parse_name(stream)?;
+                let repetition = match stream.current_byte()? {
+                    b'?' => {
+                        stream.advance(1);
+                        Repetition::QuestionMark
+                    }
+                    b'*' => {
+                        stream.advance(1);
+                        Repetition::Star
+                    }
+                    b'+' => {
+                        stream.advance(1);
+                        Repetition::Plus
+                    }
+                    _ => Repetition::Once,
+                };
+
+                let particle = ElementContentType::Name { name, repetition };
+            }
+        }
+    }
+
+    stream.expect_byte(b')')?;
+    let repetition = match stream.current_byte()? {
+        b'?' => {
+            stream.advance(1);
+            Repetition::QuestionMark
+        }
+        b'*' => {
+            stream.advance(1);
+            Repetition::Star
+        }
+        b'+' => {
+            stream.advance(1);
+            Repetition::Plus
+        }
+        _ => Repetition::Once,
+    };
+
+    Ok(content)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1991,7 +1985,7 @@ mod test {
     #[test]
     fn test_parse_pi() {
         let mut stream = stream_from(r#"<?hello world?>"#);
-        stream.parse_processing_instruction().unwrap();
+        parse_processing_instruction(&mut stream).unwrap();
         assert_eq!(
             NodeKind::ProcessingInstruction {
                 target: "hello",
@@ -2004,7 +1998,7 @@ mod test {
     #[test]
     fn test_parse_pi_empty() {
         let mut stream = stream_from(r#"<?hello?>"#);
-        stream.parse_processing_instruction().unwrap();
+        parse_processing_instruction(&mut stream).unwrap();
         assert_eq!(
             NodeKind::ProcessingInstruction {
                 target: "hello",
@@ -2017,49 +2011,49 @@ mod test {
     #[test]
     fn test_parse_pi_reserved_target() {
         let mut stream = stream_from(r#"<?xml world?>"#);
-        let res = stream.parse_processing_instruction();
+        let res = parse_processing_instruction(&mut stream);
         assert!(matches!(res, Err(ParseError::UnexpectedDeclaration(_))));
     }
 
     #[test]
     fn test_parse_pi_invalid_target_leading_whitespace() {
         let mut stream = stream_from(r#"<? target world?>"#);
-        let res = stream.parse_processing_instruction();
+        let res = parse_processing_instruction(&mut stream);
         assert!(matches!(res, Err(ParseError::InvalidXmlName(_))));
     }
 
     #[test]
     fn test_parse_pi_unexpected_eos() {
         let mut stream = stream_from(r#"<?target"#);
-        let res = stream.parse_processing_instruction();
+        let res = parse_processing_instruction(&mut stream);
         assert!(matches!(res, Err(ParseError::UnexpectedEndOfStream)));
     }
 
     #[test]
     fn test_parse_pi_invalid_name() {
         let mut stream = stream_from("<?L\u{FFFE}L hehe?>");
-        let res = stream.parse_processing_instruction();
+        let res = parse_processing_instruction(&mut stream);
         assert!(matches!(res, Err(ParseError::InvalidXmlChar(_, _))));
     }
 
     #[test]
     fn test_parse_pi_invalid_close_1() {
         let mut stream = stream_from(r#"<?target data?"#);
-        let res = stream.parse_processing_instruction();
+        let res = parse_processing_instruction(&mut stream);
         assert!(matches!(res, Err(ParseError::UnexpectedEndOfStream)));
     }
 
     #[test]
     fn test_parse_pi_invalid_close_2() {
         let mut stream = stream_from(r#"<?target data?<a/>"#);
-        let res = stream.parse_processing_instruction();
+        let res = parse_processing_instruction(&mut stream);
         assert!(matches!(res, Err(ParseError::UnexpectedCharacter(_, _, _))));
     }
 
     #[test]
     fn test_parse_pi_invalid_data() {
         let mut stream = stream_from("<?target dat\u{FFFF}a?>");
-        let res = stream.parse_processing_instruction();
+        let res = parse_processing_instruction(&mut stream);
         assert!(matches!(res, Err(ParseError::InvalidXmlChar(_, _))));
     }
 
@@ -2073,14 +2067,14 @@ mod test {
     #[test]
     fn test_parse_stag_reserved_prefix() {
         let mut stream = stream_from(r#"<xmlns:world/>"#);
-        let res = stream.parse_element_start();
+        let res = parse_element_start(&mut stream);
         assert!(matches!(res, Err(ParseError::ReservedPrefix(_))));
     }
 
     #[test]
     fn test_parse_ns_decl() {
         let mut stream = stream_from(r#"xmlns:foo="https://www.google.com""#);
-        let res = stream.parse_attribute().unwrap();
+        let res = parse_attribute(&mut stream).unwrap();
         assert_eq!(
             Token::Attribute {
                 prefix: Some("xmlns"),
@@ -2094,7 +2088,7 @@ mod test {
     #[test]
     fn test_parse_ns_decl_default() {
         let mut stream = stream_from(r#"xmlns="https://www.google.com""#);
-        let res = stream.parse_attribute().unwrap();
+        let res = parse_attribute(&mut stream).unwrap();
         assert_eq!(
             Token::Attribute {
                 prefix: None,
@@ -2108,7 +2102,7 @@ mod test {
     #[test]
     fn test_parse_invalid_xml_prefix_uri() {
         let mut stream = stream_with_element(r#"xmlns:xml="https://www.google.com""#);
-        let token = stream.parse_attribute().unwrap();
+        let token = parse_attribute(&mut stream).unwrap();
         let res = stream.emit_token(token);
         assert!(matches!(res, Err(ParseError::InvalidXmlPrefixUri(_))));
     }
@@ -2116,7 +2110,7 @@ mod test {
     #[test]
     fn test_parse_unexpected_xml_uri() {
         let mut stream = stream_with_element(r#"xmlns:a="http://www.w3.org/XML/1998/namespace""#);
-        let token = stream.parse_attribute().unwrap();
+        let token = parse_attribute(&mut stream).unwrap();
         let res = stream.emit_token(token);
         assert!(matches!(res, Err(ParseError::UnexpectedXmlUri(_))));
     }
@@ -2124,7 +2118,7 @@ mod test {
     #[test]
     fn test_parse_unexpected_xmlns_uri() {
         let mut stream = stream_with_element(r#"xmlns:a="http://www.w3.org/2000/xmlns/""#);
-        let token = stream.parse_attribute().unwrap();
+        let token = parse_attribute(&mut stream).unwrap();
         let res = stream.emit_token(token);
         assert!(matches!(res, Err(ParseError::UnexpectedXmlnsUri(_))));
     }
@@ -2132,7 +2126,7 @@ mod test {
     #[test]
     fn test_parse_unexpected_xmlns_uri_default() {
         let mut stream = stream_with_element(r#"xmlns="http://www.w3.org/2000/xmlns/""#);
-        let token = stream.parse_attribute().unwrap();
+        let token = parse_attribute(&mut stream).unwrap();
         let res = stream.emit_token(token);
         assert!(matches!(res, Err(ParseError::UnexpectedXmlnsUri(_))));
     }
@@ -2141,7 +2135,7 @@ mod test {
     #[test]
     fn test_parse_stag() {
         let mut stream = stream_from(r#"<hello/>"#);
-        let res = stream.parse_element_start().unwrap();
+        let res = parse_element_start(&mut stream).unwrap();
         assert_eq!(
             Token::ElementStart {
                 prefix: None,
@@ -2229,7 +2223,7 @@ mod test {
     #[test]
     fn test_parse_element_namespace_declaration() {
         let mut stream = stream_from(r#"<tag xmlns:foo="http://www.google.com"/>"#);
-        stream.parse_element(ElementType::Child).unwrap();
+        parse_element(&mut stream, ElementType::Child).unwrap();
 
         assert_eq!(
             NodeKind::Element {
@@ -2250,7 +2244,7 @@ mod test {
     #[test]
     fn test_parse_element_default_namespace_declaration() {
         let mut stream = stream_from(r#"<tag xmlns="http://www.google.com"/>"#);
-        stream.parse_element(ElementType::Child).unwrap();
+        parse_element(&mut stream, ElementType::Child).unwrap();
 
         assert_eq!(
             NodeKind::Element {
@@ -2271,7 +2265,7 @@ mod test {
     #[test]
     fn test_parse_element_with_attributes() {
         let mut stream = stream_from(r#"<tag some="value" another="one"></tag>"#);
-        stream.parse_element(ElementType::Child).unwrap();
+        parse_element(&mut stream, ElementType::Child).unwrap();
 
         assert_eq!(
             NodeKind::Element {
@@ -2296,7 +2290,7 @@ mod test {
     #[test]
     fn test_parse_element_empty_with_attributes() {
         let mut stream = stream_from(r#"<name some="value" another="one"/>"#);
-        stream.parse_element(ElementType::Child).unwrap();
+        parse_element(&mut stream, ElementType::Child).unwrap();
 
         assert_eq!(
             NodeKind::Element {
@@ -2323,7 +2317,7 @@ mod test {
     #[test]
     fn test_parse_attribute() {
         let mut stream = stream_from(r#"b="c""#);
-        let res = stream.parse_attribute().unwrap();
+        let res = parse_attribute(&mut stream).unwrap();
         assert_eq!(
             Token::Attribute {
                 prefix: None,
