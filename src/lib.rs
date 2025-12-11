@@ -476,33 +476,31 @@ pub enum NodeKind<'a> {
     CData(&'a str),
 }
 
+#[derive(Debug)]
 struct Entity<'a> {
     name: &'a str,
     value: &'a str,
 }
 
+#[derive(Debug)]
 struct ElementTypeDecl<'a> {
     name: &'a str,
     content_spec: ContentSpec<'a>,
 }
 
+#[derive(Debug)]
 enum ContentSpec<'a> {
     Empty,
     Any,
     MixedContent(Vec<&'a str>),
-    ElementContent(ElementContent<'a>),
+    ElementContent(Vec<ElementContent<'a>>),
 }
 
 #[derive(Debug)]
-struct ElementContent<'a> {
-    content: Vec<ElementContentType<'a>>,
-}
-
-#[derive(Debug)]
-enum ElementContentType<'a> {
+enum ElementContent<'a> {
     Name { name: &'a str, repetition: Repetition },
-    Choice(Vec<ElementContentType<'a>>),
-    Seq(Vec<ElementContentType<'a>>),
+    Choice(Vec<ElementContent<'a>>),
+    Seq(Vec<ElementContent<'a>>),
 }
 
 #[derive(Debug)]
@@ -1395,8 +1393,8 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
 fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.advance(9);
 
-    let start = stream.pos;
     stream.expect_and_consume_whitespace()?;
+    let start = stream.pos;
     let name = parse_name(stream)?;
 
     if stream.expect_and_consume_whitespace().is_err() {
@@ -1432,7 +1430,10 @@ fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'
             parse_mixed_content(stream, ctx, name)?;
         } else {
             let content = parse_element_content(stream, ctx)?;
-            dbg!(content);
+            ctx.element_types.push(ElementTypeDecl {
+                name,
+                content_spec: ContentSpec::ElementContent(content),
+            });
         }
     } else {
         return Err(ParseError::InvalidElementTypeDecl(stream.span(start, stream.pos)));
@@ -1856,7 +1857,7 @@ fn parse_comment<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
 fn parse_element_content<'a>(
     stream: &mut TokenStream<'a>,
     ctx: &mut Context<'a>,
-) -> ParseResult<Vec<ElementContentType<'a>>> {
+) -> ParseResult<Vec<ElementContent<'a>>> {
     let mut content = Vec::new();
     // Leading '(' and any whitespace was already consumed
     match stream.current_byte()? {
@@ -1884,11 +1885,11 @@ fn parse_element_content<'a>(
                 _ => Repetition::Once,
             };
 
-            content.push(ElementContentType::Name { name, repetition });
+            content.push(ElementContent::Name { name, repetition });
         }
     }
 
-    let mut content_type: Option<ElementContentType> = None;
+    let mut content_type: Option<ElementContent> = None;
     loop {
         stream.consume_whitespace();
 
@@ -1897,20 +1898,20 @@ fn parse_element_content<'a>(
             b')' => break,
             b',' => {
                 match content_type {
-                    None => content_type = Some(ElementContentType::Seq(Vec::new())),
-                    Some(ElementContentType::Choice(_)) => panic!("TODO: Invalid element content sep"),
-                    Some(ElementContentType::Name { .. }) => panic!("TODO: Invalid element content sep"),
-                    Some(ElementContentType::Seq(_)) => {}
+                    None => content_type = Some(ElementContent::Seq(Vec::new())),
+                    Some(ElementContent::Choice(_)) => panic!("TODO: Invalid element content sep"),
+                    Some(ElementContent::Name { .. }) => panic!("TODO: Invalid element content sep"),
+                    Some(ElementContent::Seq(_)) => {}
                 }
                 stream.advance(1);
             }
 
             b'|' => {
                 match content_type {
-                    None => content_type = Some(ElementContentType::Choice(Vec::new())),
-                    Some(ElementContentType::Seq(_)) => panic!("TODO: Invalid element content sep"),
-                    Some(ElementContentType::Name { .. }) => panic!("TODO: Invalid element content sep"),
-                    Some(ElementContentType::Choice(_)) => {}
+                    None => content_type = Some(ElementContent::Choice(Vec::new())),
+                    Some(ElementContent::Seq(_)) => panic!("TODO: Invalid element content sep"),
+                    Some(ElementContent::Name { .. }) => panic!("TODO: Invalid element content sep"),
+                    Some(ElementContent::Choice(_)) => {}
                 }
                 stream.advance(1);
             }
@@ -1936,7 +1937,7 @@ fn parse_element_content<'a>(
                     _ => Repetition::Once,
                 };
 
-                let _particle = ElementContentType::Name { name, repetition };
+                let _particle = ElementContent::Name { name, repetition };
             }
         }
     }
