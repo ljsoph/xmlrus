@@ -7,7 +7,7 @@ mod ibm_valid {
             paste! {
                 #[test]
                 fn [<$test_name>]() {
-                    let source = std::fs::read_to_string(format!("tests/test_files/ibm/valid/{}.xml", stringify!($test_name))).unwrap_or_default();
+                    let source = std::fs::read_to_string(format!("tests/test_files/ibm/valid/{}.xml", stringify!($test_name))).unwrap();
                     let res = xmlrus::Parser::parse(&source);
                     assert!(res.is_ok(), $reason);
                 }
@@ -16,7 +16,7 @@ mod ibm_valid {
     }
 
     ibm_valid!(ibm01v01, "Tests with a xml document consisting of <EM>prolog</EM> followed by <EM>element</EM> then <EM>Misc</EM>");
-    ibm_valid!(ibm02v01, "Tests <B>Char</B> with 3 characters - 2 boundaries plus 1 in the middle - for each range plus #x20 #x9 #xD #xA");
+    ibm_valid!(ibm02v01, "Tests Char with 3 characters - 2 boundaries plus 1 in the middle - for each range plus #x20 #x9 #xD #xA");
     ibm_valid!(ibm03v01, "Tests all 4 legal white space characters - #x20 #x9 #xD #xA");
     ibm_valid!(ibm09v01, "Tests Empty EntityValue");
     ibm_valid!(ibm09v02, "Tests a normal EnitityValue");

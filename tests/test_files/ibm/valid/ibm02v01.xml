@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <!DOCTYPE book [
-<!ELEMENT book ANY>
-<!-- This test case covers 3 legal character ranges plus
-     3 discrete legal characters for production 02. -->
-<?NAME_09-	_0A-
-_0D-_20- _D7FF-퟿_6c0f-氏_E000-_FFFD-�_effe-_010000-�_10FFFF-�_08ffff-� This is a PI target ?>
+    <!ELEMENT book ANY>
+    <!-- This test case covers 3 legal character ranges plus
+    3 discrete legal characters for production 02. -->
+    <?NAME_09-	_0A-
+    _0D-_20-_D7FF-í¿_6c0f-æ°_E000-î_FFFD-ï¿œ_effe-î¿Ÿ_010000-ð_10FFFF-ô¿_08ffff-ò¿ This is a PI target ?>
 ]>
 <book/>
