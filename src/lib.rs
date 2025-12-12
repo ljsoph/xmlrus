@@ -476,31 +476,58 @@ pub enum NodeKind<'a> {
     CData(&'a str),
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct Entity<'a> {
     name: &'a str,
     value: &'a str,
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct ElementTypeDecl<'a> {
     name: &'a str,
     content_spec: ContentSpec<'a>,
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 enum ContentSpec<'a> {
     Empty,
     Any,
     MixedContent(Vec<&'a str>),
-    ElementContent(Vec<ElementContent<'a>>),
+    ElementContent(ElementContent<'a>),
 }
 
+#[allow(unused)]
 #[derive(Debug)]
-enum ElementContent<'a> {
-    Name { name: &'a str, repetition: Repetition },
-    Choice(Vec<ElementContent<'a>>),
-    Seq(Vec<ElementContent<'a>>),
+struct ElementContent<'a> {
+    children: ElementContentChildren<'a>,
+    repetition: Repetition,
+}
+
+#[allow(unused)]
+#[derive(Debug)]
+enum ContentParticle<'a> {
+    Name {
+        name: &'a str,
+        repetition: Repetition,
+    },
+    Choice {
+        content: Vec<ContentParticle<'a>>,
+        repetition: Repetition,
+    },
+    Seq {
+        content: Vec<ContentParticle<'a>>,
+        repetition: Repetition,
+    },
+}
+
+#[allow(unused)]
+#[derive(Debug)]
+enum ElementContentChildren<'a> {
+    Choice(Vec<ContentParticle<'a>>),
+    Seq(Vec<ContentParticle<'a>>),
 }
 
 #[derive(Debug)]
@@ -1082,6 +1109,8 @@ impl Parser {
 
         parse_document(&mut stream, &mut ctx)?;
 
+        dbg!(ctx.element_types);
+
         Ok(ctx.doc)
     }
 }
@@ -1422,17 +1451,17 @@ fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'
         });
         stream.advance(3);
     } else if stream.peek_seq("(") {
-        // TODO: Parse 'Mixed' & 'children' content specs
         stream.expect_byte(b'(')?;
         stream.consume_whitespace();
 
         if stream.peek_seq("#PCDATA") {
             parse_mixed_content(stream, ctx, name)?;
         } else {
-            let content = parse_element_content(stream, ctx)?;
+            let children = parse_element_content_children(stream, ctx)?;
+            let repetition = parse_repetition(stream)?;
             ctx.element_types.push(ElementTypeDecl {
                 name,
-                content_spec: ContentSpec::ElementContent(content),
+                content_spec: ContentSpec::ElementContent(ElementContent { children, repetition }),
             });
         }
     } else {
@@ -1495,12 +1524,12 @@ fn parse_mixed_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, 
     Ok(())
 }
 
-fn parse_parameter_entity_ref<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+fn parse_parameter_entity_ref<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
     // TODO: Something with me
     stream.expect_byte(b'%')?;
-    let _name = parse_name(stream)?;
+    let name = parse_name(stream)?;
     stream.expect_byte(b';')?;
-    Ok(())
+    Ok(name)
 }
 
 // EntityDecl  ::=  GEDecl | PEDecl
@@ -1521,7 +1550,6 @@ fn parse_entity_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) ->
 
     stream.expect_byte(b'>')?;
 
-    // TODO: Does this need to be an error?
     // If the same entity is declared more than once, the first declaration encountered is binding
     if ctx.entities.iter().any(|entity| entity.name == name) {
         return Ok(());
@@ -1779,11 +1807,8 @@ fn parse_cdata<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Parse
         stream.advance(1);
     }
 
-    let end = stream.pos;
-    let data = &stream.source[start..end]; // TODO: slice
-
+    let data = stream.slice(start, stream.pos);
     validate::is_xml_chars(data, start, stream)?;
-
     stream.advance(3);
     ctx.emit_token(stream, Token::CData { data })?;
 
@@ -1854,96 +1879,127 @@ fn parse_comment<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
 // cp           ::=  (Name | choice | seq) ('?' | '*' | '+')?
 // choice       ::=  '(' S? cp ( S? '|' S? cp )+ S? ')'         TODO: [VC: Proper Group/PE Nesting]
 // seq          ::=  '(' S? cp ( S? ',' S? cp )* S? ')'         TODO: [VC: Proper Group/PE Nesting]
-fn parse_element_content<'a>(
+fn parse_element_content_children<'a>(
     stream: &mut TokenStream<'a>,
     ctx: &mut Context<'a>,
-) -> ParseResult<Vec<ElementContent<'a>>> {
-    let mut content = Vec::new();
-    // Leading '(' and any whitespace was already consumed
-    match stream.current_byte()? {
-        b'%' => parse_parameter_entity_ref(stream, ctx)?,
-        b'(' => {
-            // Started with a nested content particle
-            stream.advance(1);
-            content.extend(parse_element_content(stream, ctx)?);
-        }
-        _ => {
-            let name = parse_name(stream)?;
-            let repetition = match stream.current_byte()? {
-                b'?' => {
-                    stream.advance(1);
-                    Repetition::QuestionMark
-                }
-                b'*' => {
-                    stream.advance(1);
-                    Repetition::Star
-                }
-                b'+' => {
-                    stream.advance(1);
-                    Repetition::Plus
-                }
-                _ => Repetition::Once,
-            };
-
-            content.push(ElementContent::Name { name, repetition });
-        }
+) -> ParseResult<ElementContentChildren<'a>> {
+    enum Type {
+        Seq,
+        Choice,
     }
 
-    let mut content_type: Option<ElementContent> = None;
+    // Leading '(' and any whitespace was already consumed
+    let mut content = vec![parse_content_particle(stream, ctx)?];
+    let mut content_type: Option<Type> = None;
+
     loop {
         stream.consume_whitespace();
 
         match stream.current_byte()? {
-            b'%' => parse_parameter_entity_ref(stream, ctx)?,
+            b'%' => {
+                let name = parse_parameter_entity_ref(stream)?;
+                content.push(ContentParticle::Name {
+                    name,
+                    repetition: Repetition::Once,
+                });
+            }
             b')' => break,
             b',' => {
-                match content_type {
-                    None => content_type = Some(ElementContent::Seq(Vec::new())),
-                    Some(ElementContent::Choice(_)) => panic!("TODO: Invalid element content sep"),
-                    Some(ElementContent::Name { .. }) => panic!("TODO: Invalid element content sep"),
-                    Some(ElementContent::Seq(_)) => {}
-                }
                 stream.advance(1);
+                stream.consume_whitespace();
+                match content_type {
+                    None => content_type = Some(Type::Seq),
+                    Some(Type::Choice) => panic!("TODO: Invalid element content sep"),
+                    Some(Type::Seq) => {
+                        let name = parse_name(stream)?;
+                        let repetition = parse_repetition(stream)?;
+                        content.push(ContentParticle::Name { name, repetition });
+                    }
+                }
             }
 
             b'|' => {
-                match content_type {
-                    None => content_type = Some(ElementContent::Choice(Vec::new())),
-                    Some(ElementContent::Seq(_)) => panic!("TODO: Invalid element content sep"),
-                    Some(ElementContent::Name { .. }) => panic!("TODO: Invalid element content sep"),
-                    Some(ElementContent::Choice(_)) => {}
-                }
                 stream.advance(1);
+                stream.consume_whitespace();
+                match content_type {
+                    None => content_type = Some(Type::Choice),
+                    Some(Type::Seq) => panic!("TODO: Invalid element content sep"),
+                    Some(Type::Choice) => {
+                        let name = parse_name(stream)?;
+                        let repetition = parse_repetition(stream)?;
+                        content.push(ContentParticle::Name { name, repetition });
+                    }
+                }
             }
             b'(' => {
                 stream.advance(1);
-                content.extend(parse_element_content(stream, ctx)?);
+                stream.consume_whitespace();
+                let children = parse_element_content_children(stream, ctx)?;
+                let repetition = parse_repetition(stream)?;
+                let children = match children {
+                    ElementContentChildren::Choice(children) => ContentParticle::Choice {
+                        content: children,
+                        repetition,
+                    },
+                    ElementContentChildren::Seq(children) => ContentParticle::Seq {
+                        content: children,
+                        repetition,
+                    },
+                };
+                content.push(children);
             }
             _ => {
                 let name = parse_name(stream)?;
-                let repetition = match stream.current_byte()? {
-                    b'?' => {
-                        stream.advance(1);
-                        Repetition::QuestionMark
-                    }
-                    b'*' => {
-                        stream.advance(1);
-                        Repetition::Star
-                    }
-                    b'+' => {
-                        stream.advance(1);
-                        Repetition::Plus
-                    }
-                    _ => Repetition::Once,
-                };
-
-                let _particle = ElementContent::Name { name, repetition };
+                let repetition = parse_repetition(stream)?;
+                content.push(ContentParticle::Name { name, repetition });
             }
         }
     }
 
     stream.expect_byte(b')')?;
-    let _repetition = match stream.current_byte()? {
+
+    let children = match content_type {
+        Some(Type::Choice) => ElementContentChildren::Choice(content),
+        Some(Type::Seq) | None => ElementContentChildren::Seq(content),
+    };
+
+    Ok(children)
+}
+
+fn parse_content_particle<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<ContentParticle<'a>> {
+    match stream.current_byte()? {
+        b'%' => {
+            let name = parse_parameter_entity_ref(stream)?;
+            Ok(ContentParticle::Name {
+                name,
+                repetition: Repetition::Once,
+            })
+        }
+        b'(' => {
+            stream.advance(1);
+            let children = parse_element_content_children(stream, ctx)?;
+            let repetition = parse_repetition(stream)?;
+            match children {
+                ElementContentChildren::Choice(children) => Ok(ContentParticle::Choice {
+                    content: children,
+                    repetition,
+                }),
+                ElementContentChildren::Seq(children) => Ok(ContentParticle::Seq {
+                    content: children,
+                    repetition,
+                }),
+            }
+        }
+        _ => {
+            let name = parse_name(stream)?;
+            let repetition = parse_repetition(stream)?;
+            Ok(ContentParticle::Name { name, repetition })
+        }
+    }
+}
+
+fn parse_repetition<'a>(stream: &mut TokenStream<'a>) -> ParseResult<Repetition> {
+    let repetition = match stream.current_byte()? {
         b'?' => {
             stream.advance(1);
             Repetition::QuestionMark
@@ -1959,7 +2015,7 @@ fn parse_element_content<'a>(
         _ => Repetition::Once,
     };
 
-    Ok(content)
+    Ok(repetition)
 }
 
 #[cfg(test)]
