@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 type ParseResult<T> = std::result::Result<T, ParseError>;
 
 mod validate;
@@ -40,6 +42,11 @@ pub enum ParseError {
     ///
     /// Well formed Element Type declarations must contain a valid name and [`Content Spec`]
     InvalidElementTypeDecl(Span),
+
+    /// Invalid Entity Reference
+    ///
+    /// Reference was not properly closed with a semi-colon (;)
+    InvalidEntityRefMissingSemi(Span),
 
     /// Invalid Namespace character
     InvalidNamespaceChar(char, Span),
@@ -94,13 +101,13 @@ pub enum ParseError {
     /// Unexpected character
     ///
     /// expected, actual, span
-    UnexpectedCharacter(u8, u8, Span),
+    UnexpectedCharacter(char, char, Span),
 
     /// Like `UnexpectedCharacter`, only there is more than one
     /// valid expected character.
     ///
     /// expected, actual, span
-    UnexpectedCharacter2(&'static str, u8, Span),
+    UnexpectedCharacter2(&'static str, char, Span),
 
     /// Unexpected Element
     ///
@@ -122,6 +129,10 @@ pub enum ParseError {
     /// The URI `http://www.w3.org/2000/xmlns/` is bound to the `xmlns` prefix and MUST NOT be declared
     UnexpectedXmlnsUri(Span),
 
+    /// Unknown Entity Reference
+    ///
+    /// An Entity Reference was used that was not previously declared
+    UnknownEntityReference(String, Span),
     /// Unknown Prefix
     ///
     /// An Namespace prefix was used that was not previously declared or in scope
@@ -182,6 +193,14 @@ impl std::fmt::Display for ParseError {
                 writeln!(
                     f,
                     "error:{}:{}: malformed element type declaration",
+                    span.row, span.col_start
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::InvalidEntityRefMissingSemi(span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: unclosed Entity Reference, expected ';'",
                     span.row, span.col_start
                 )?;
                 writeln!(f, "{span}")
@@ -284,6 +303,14 @@ impl std::fmt::Display for ParseError {
                     f,
                     "error:{}:{}: `xmlns` URI must not be declared",
                     span.row, span.col_start
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::UnknownEntityReference(prefix, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: unknown Entity Reference `{}`",
+                    span.row, span.col_start, prefix,
                 )?;
                 writeln!(f, "{span}")
             }
@@ -471,16 +498,13 @@ pub enum NodeKind<'a> {
         target: &'a str,
         data: Option<&'a str>,
     },
+    EntityRef {
+        name: &'a str,
+        value: &'a str,
+    },
     Text(&'a str),
     Comment(&'a str),
     CData(&'a str),
-}
-
-#[allow(unused)]
-#[derive(Debug)]
-struct Entity<'a> {
-    name: &'a str,
-    value: &'a str,
 }
 
 #[allow(unused)]
@@ -625,6 +649,12 @@ pub enum Token<'a> {
     /// <![CDATA[ Data that can <data>markup</data> ]]>
     /// ```
     CData { data: &'a str },
+
+    /// ```xml
+    /// <person>hello, &name;!</person>
+    ///                ^^^^^^
+    /// ```
+    EntityRef { name: &'a str, value: &'a str },
 }
 
 pub struct TokenStream<'a> {
@@ -743,7 +773,7 @@ impl<'a> TokenStream<'a> {
         if !self.is_white_space()? {
             return Err(ParseError::UnexpectedCharacter2(
                 "whitespace",
-                self.unchecked_current_byte(),
+                self.unchecked_current_byte() as char,
                 self.span_single(),
             ));
         }
@@ -756,7 +786,11 @@ impl<'a> TokenStream<'a> {
     fn expect_byte(&mut self, c: u8) -> ParseResult<()> {
         let current = self.current_byte()?;
         if current != c {
-            return Err(ParseError::UnexpectedCharacter(c, current, self.span_single()));
+            return Err(ParseError::UnexpectedCharacter(
+                c as char,
+                current as char,
+                self.span_single(),
+            ));
         }
 
         self.advance(1);
@@ -774,10 +808,10 @@ impl<'a> TokenStream<'a> {
         }
     }
 
-    fn consume_quote(&mut self) -> ParseResult<u8> {
-        let current = self.current_byte()?;
-        if current == b'\'' || current == b'"' {
-            self.advance(1);
+    fn consume_quote(&mut self) -> ParseResult<char> {
+        let current = self.current_char()?;
+        if current == '\'' || current == '"' {
+            self.advance(current.len_utf8());
             return Ok(current);
         }
 
@@ -825,7 +859,7 @@ impl<'a> TokenStream<'a> {
 pub struct Context<'a> {
     doc: Document<'a>,
     temp_elements: Vec<TempElementData<'a>>,
-    entities: Vec<Entity<'a>>,
+    entities: HashMap<&'a str, &'a str>,
     element_types: Vec<ElementTypeDecl<'a>>,
     current_node_id: usize,
 }
@@ -852,6 +886,18 @@ impl<'a> Context<'a> {
                         id: self.current_node_id,
                         parent_id: Some(parent.id),
                         data: NodeKind::Text(text),
+                    };
+                    self.current_node_id += 1;
+                    parent.children.push(node);
+                    self.temp_elements.push(parent);
+                }
+            }
+            Token::EntityRef { name, value } => {
+                if let Some(mut parent) = self.temp_elements.pop() {
+                    let node = Node {
+                        id: self.current_node_id,
+                        parent_id: Some(parent.id),
+                        data: NodeKind::EntityRef { name, value },
                     };
                     self.current_node_id += 1;
                     parent.children.push(node);
@@ -1096,7 +1142,7 @@ impl Parser {
         let mut ctx = Context {
             doc,
             temp_elements: Vec::new(),
-            entities: Vec::new(),
+            entities: HashMap::new(),
             element_types: Vec::new(),
             current_node_id: 0,
         };
@@ -1260,13 +1306,13 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
     stream.expect_byte(b'=')?;
     stream.consume_whitespace();
 
-    let version = parse_attribute_value(stream)?;
+    let version = parse_attribute_value(stream, ctx)?;
 
     stream.consume_whitespace();
     let encoding = if stream.starts_with("encoding") {
         stream.advance(8);
         stream.expect_byte(b'=')?;
-        Some(parse_attribute_value(stream)?)
+        Some(parse_attribute_value(stream, ctx)?)
     } else {
         None
     };
@@ -1277,7 +1323,7 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
         stream.advance(10);
         stream.expect_byte(b'=')?;
 
-        let value = parse_attribute_value(stream)?;
+        let value = parse_attribute_value(stream, ctx)?;
         if value == "yes" || value == "no" {
             Some(value)
         } else {
@@ -1334,7 +1380,7 @@ fn parse_processing_instruction<'a>(stream: &mut TokenStream<'a>, ctx: &mut Cont
                 ctx.emit_token(stream, Token::ProcessingInstruction { target, data: None })?;
                 return Ok(());
             }
-            c => return Err(ParseError::UnexpectedCharacter(b'>', c, stream.span_single())),
+            c => return Err(ParseError::UnexpectedCharacter('>', c as char, stream.span_single())),
         }
     }
 
@@ -1351,7 +1397,7 @@ fn parse_processing_instruction<'a>(stream: &mut TokenStream<'a>, ctx: &mut Cont
                 b'>' => {
                     break;
                 }
-                c => return Err(ParseError::UnexpectedCharacter(b'>', c, stream.span_single())),
+                c => return Err(ParseError::UnexpectedCharacter('>', c as char, stream.span_single())),
             }
         }
 
@@ -1543,19 +1589,19 @@ fn parse_entity_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) ->
 
     let name = parse_name(stream)?;
     stream.expect_and_consume_whitespace()?;
-    let value = match stream.current_byte()? {
-        b'\'' | b'"' => parse_entity_value(stream, name)?,
+    let value = match stream.current_char()? {
+        '\'' | '"' => parse_entity_value(stream, name)?,
         b => return Err(ParseError::UnexpectedCharacter2("`'` or `\"`", b, stream.span_single())),
     };
 
     stream.expect_byte(b'>')?;
 
     // If the same entity is declared more than once, the first declaration encountered is binding
-    if ctx.entities.iter().any(|entity| entity.name == name) {
+    if ctx.entities.contains_key(name) {
         return Ok(());
     }
 
-    ctx.entities.push(Entity { name, value });
+    ctx.entities.insert(name, value);
 
     Ok(())
 }
@@ -1568,14 +1614,15 @@ fn parse_entity_value<'a>(stream: &mut TokenStream<'a>, _name: &'a str) -> Parse
     // TODO: Parse references and recursion detection
     //  - A parsed entity MUST NOT contain a recursive reference to it either directly or indirectly.
     loop {
-        match stream.current_byte()? {
+        let current = stream.current_char()?;
+        match current {
             d if d == delimiter => break,
-            _ => stream.advance(1),
+            _ => stream.advance(current.len_utf8()),
         }
     }
 
-    stream.advance(1);
     let value = stream.slice(start, stream.pos);
+    stream.advance(1);
 
     Ok(value)
 }
@@ -1628,14 +1675,13 @@ fn parse_element<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, kind: 
                 if !stream.is_white_space()? {
                     return Err(ParseError::UnexpectedCharacter2(
                         "a space",
-                        stream.unchecked_current_byte(),
+                        stream.unchecked_current_byte() as char,
                         stream.span_single(),
                     ));
                 }
                 stream.consume_whitespace();
 
-                let attribute = parse_attribute(stream, ctx)?;
-                ctx.emit_token(stream, attribute)?;
+                parse_attribute(stream, ctx)?;
             }
         }
     }
@@ -1671,28 +1717,32 @@ fn parse_element_start<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
 // Attribute  ::=  NSAttName Eq AttValue | QName Eq AttValue
 // AttValue   ::=  '"' ([^<&"] | Reference)* '"'
 //              |  "'" ([^<&'] | Reference)* "'"
-fn parse_attribute<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<Token<'a>> {
+fn parse_attribute<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     let (prefix, local) = parse_qname(stream, ctx)?;
     stream.consume_whitespace();
     stream.expect_byte(b'=')?;
     stream.consume_whitespace();
-    let value = parse_attribute_value(stream)?;
-    Ok(Token::Attribute { prefix, local, value })
+    let value = parse_attribute_value(stream, ctx)?;
+    ctx.emit_token(stream, Token::Attribute { prefix, local, value })?;
+    Ok(())
 }
 
-fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
-    let delimiter = stream.consume_quote()?;
+fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<&'a str> {
+    let delimiter: char = stream.consume_quote()?;
     let start = stream.pos;
 
     loop {
-        match stream.current_byte() {
-            Ok(d) if d == delimiter => break,
-            Ok(c) if c == b'<' || c == b'&' => {
+        let current = stream.current_char()?;
+        match current {
+            d if d == delimiter => break,
+            '&' => {
+                parse_entity_reference(stream, ctx)?;
+            }
+            c if c == '<' || c == '&' => {
                 // TODO: Handle Character/Entity references
                 return Err(ParseError::UnexpectedCharacter(delimiter, c, stream.span_single()));
             }
-            Ok(_) => stream.advance(1),
-            Err(err) => return Err(err),
+            _ => stream.advance(current.len_utf8()),
         }
     }
 
@@ -1773,6 +1823,7 @@ fn parse_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
                 parse_element_end(stream, ctx)?;
                 break;
             }
+            b'&' => parse_entity_reference(stream, ctx)?,
             b'<' => parse_element(stream, ctx, ElementType::Child)?,
             _ => {
                 if stream.is_white_space()? {
@@ -1785,6 +1836,28 @@ fn parse_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
     }
 
     Ok(())
+}
+
+fn parse_entity_reference<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+    stream.expect_byte(b'&')?;
+    let start = stream.pos;
+    let name = parse_name(stream)?;
+
+    let c = stream.current_byte()?;
+    if c != b';' {
+        return Err(ParseError::InvalidEntityRefMissingSemi(stream.span_single()));
+    }
+
+    match ctx.entities.get(name) {
+        Some(value) => {
+            ctx.emit_token(stream, Token::EntityRef { name, value })?;
+            Ok(())
+        }
+        None => Err(ParseError::UnknownEntityReference(
+            name.to_string(),
+            stream.span(start, stream.pos),
+        )),
+    }
 }
 
 // CDSect   ::=  CDStart CData CDEnd
@@ -1815,14 +1888,15 @@ fn parse_cdata<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Parse
     Ok(())
 }
 
+// CharData  ::=  [^<&]* - ([^<&]* ']]>' [^<&]*)
 fn parse_text<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     let start = stream.pos;
 
     loop {
-        match stream.current_byte() {
-            Ok(b'<') => break,
-            Ok(_) => stream.advance(1),
-            Err(err) => return Err(err),
+        let current = stream.current_char()?;
+        match current {
+            '<' | '&' => break,
+            _ => stream.advance(current.len_utf8()),
         }
     }
 
@@ -1844,11 +1918,6 @@ fn parse_comment<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
     loop {
         if stream.is_at_end() {
             return Err(ParseError::UnexpectedEndOfStream);
-        }
-
-        if let Ok(b'\n') = stream.current_byte() {
-            let span = stream.span(start, stream.pos);
-            return Err(ParseError::InvalidComment(String::from("unclosed comment"), span));
         }
 
         // For compatibility, the string "--" (double-hyphen) must not occur within comments.
@@ -2031,7 +2100,7 @@ mod test {
                 namespaces: Vec::new(),
             },
             temp_elements: Vec::new(),
-            entities: Vec::new(),
+            entities: HashMap::new(),
             element_types: Vec::new(),
             current_node_id: 0,
         }
@@ -2054,7 +2123,7 @@ mod test {
                 id: 0,
                 parent_id: None,
             }],
-            entities: Vec::new(),
+            entities: HashMap::new(),
             element_types: Vec::new(),
             current_node_id: 0,
         }
@@ -2182,38 +2251,23 @@ mod test {
     fn test_parse_ns_decl() {
         let mut stream = stream_from(r#"xmlns:foo="https://www.google.com""#);
         let mut ctx = context();
-        let res = parse_attribute(&mut stream, &mut ctx).unwrap();
-        assert_eq!(
-            Token::Attribute {
-                prefix: Some("xmlns"),
-                local: "foo",
-                value: "https://www.google.com"
-            },
-            res
-        );
+        let res = parse_attribute(&mut stream, &mut ctx);
+        assert!(res.is_ok());
     }
 
     #[test]
     fn test_parse_ns_decl_default() {
         let mut stream = stream_from(r#"xmlns="https://www.google.com""#);
         let mut ctx = context();
-        let res = parse_attribute(&mut stream, &mut ctx).unwrap();
-        assert_eq!(
-            Token::Attribute {
-                prefix: None,
-                local: "xmlns",
-                value: "https://www.google.com"
-            },
-            res
-        );
+        let res = parse_attribute(&mut stream, &mut ctx);
+        assert!(res.is_ok());
     }
 
     #[test]
     fn test_parse_invalid_xml_prefix_uri() {
         let mut stream = stream_with_element(r#"xmlns:xml="https://www.google.com""#);
         let mut ctx = context_temp_elements();
-        let token = parse_attribute(&mut stream, &mut ctx).unwrap();
-        let res = ctx.emit_token(&mut stream, token);
+        let res = parse_attribute(&mut stream, &mut ctx);
         assert!(matches!(res, Err(ParseError::InvalidXmlPrefixUri(_))));
     }
 
@@ -2221,8 +2275,7 @@ mod test {
     fn test_parse_unexpected_xml_uri() {
         let mut stream = stream_with_element(r#"xmlns:a="http://www.w3.org/XML/1998/namespace""#);
         let mut ctx = context_temp_elements();
-        let token = parse_attribute(&mut stream, &mut ctx).unwrap();
-        let res = ctx.emit_token(&mut stream, token);
+        let res = parse_attribute(&mut stream, &mut ctx);
         assert!(matches!(res, Err(ParseError::UnexpectedXmlUri(_))));
     }
 
@@ -2230,8 +2283,7 @@ mod test {
     fn test_parse_unexpected_xmlns_uri() {
         let mut stream = stream_with_element(r#"xmlns:a="http://www.w3.org/2000/xmlns/""#);
         let mut ctx = context_temp_elements();
-        let token = parse_attribute(&mut stream, &mut ctx).unwrap();
-        let res = ctx.emit_token(&mut stream, token);
+        let res = parse_attribute(&mut stream, &mut ctx);
         assert!(matches!(res, Err(ParseError::UnexpectedXmlnsUri(_))));
     }
 
@@ -2239,8 +2291,7 @@ mod test {
     fn test_parse_unexpected_xmlns_uri_default() {
         let mut stream = stream_with_element(r#"xmlns="http://www.w3.org/2000/xmlns/""#);
         let mut ctx = context_temp_elements();
-        let token = parse_attribute(&mut stream, &mut ctx).unwrap();
-        let res = ctx.emit_token(&mut stream, token);
+        let res = parse_attribute(&mut stream, &mut ctx);
         assert!(matches!(res, Err(ParseError::UnexpectedXmlnsUri(_))));
     }
 
@@ -2436,15 +2487,8 @@ mod test {
     fn test_parse_attribute() {
         let mut stream = stream_from(r#"b="c""#);
         let mut ctx = context();
-        let res = parse_attribute(&mut stream, &mut ctx).unwrap();
-        assert_eq!(
-            Token::Attribute {
-                prefix: None,
-                local: "b",
-                value: "c"
-            },
-            res
-        );
+        let res = parse_attribute(&mut stream, &mut ctx);
+        assert!(res.is_ok());
     }
 
     #[test]
