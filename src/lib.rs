@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 
 type ParseResult<T> = std::result::Result<T, ParseError>;
 
@@ -29,6 +30,9 @@ pub enum ParseError {
     /// Unescaped ampersands (`&`) and left angle brackets (`<`) will be parsed as separate errors.
     /// This error represents a [`CharData`] that contains the CDATA-section-close delimiter `]]>`
     InvalidCharData(Span),
+
+    /// Invalid Character Reference
+    InvalidCharRef(String, Span),
 
     /// Invalid Comment
     InvalidComment(String, Span),
@@ -92,6 +96,9 @@ pub enum ParseError {
 
     /// Root Node was not properly closed
     UnclosedRoot,
+
+    /// Unescaped '<' in Attribute Value
+    UnescapedLTInAttrValue(Span),
 
     /// Unexpected XML Declaration encountered.
     ///
@@ -173,6 +180,14 @@ impl std::fmt::Display for ParseError {
                 writeln!(
                     f,
                     "error:{}:{}: sequence ']]>' is not allowed inside character data",
+                    span.row, span.col_start
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::InvalidCharRef(reason, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: invalid character reference: {reason}",
                     span.row, span.col_start
                 )?;
                 writeln!(f, "{span}")
@@ -265,6 +280,14 @@ impl std::fmt::Display for ParseError {
             ParseError::UnclosedRoot => {
                 writeln!(f, "error: unclosed root element")
             }
+            ParseError::UnescapedLTInAttrValue(span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: unescaped '<' in attribute value",
+                    span.row, span.col_start
+                )?;
+                writeln!(f, "{span}")
+            }
             ParseError::UnexpectedDeclaration(span) => {
                 writeln!(
                     f,
@@ -274,16 +297,12 @@ impl std::fmt::Display for ParseError {
             }
             ParseError::UnexpectedCharacter(expected, actual, span) => {
                 writeln!(f, "error:{}:{}: unexpected character at", span.row, span.col_start)?;
-                writeln!(
-                    f,
-                    "  Expected: '{}'\n  Actual:   '{}'",
-                    *expected as char, *actual as char
-                )?;
+                writeln!(f, "  Expected: '{}'\n  Actual:   '{}'", expected, actual)?;
                 write!(f, "{span}")
             }
             ParseError::UnexpectedCharacter2(expected, actual, span) => {
                 writeln!(f, "error:{}:{}: unexpected character", span.row, span.col_start)?;
-                writeln!(f, "  expected: {}\n  actual:   '{}'", expected, *actual as char)?;
+                writeln!(f, "  expected: {}\n  actual:   '{}'", expected, actual)?;
                 writeln!(f, "{span}")
             }
             ParseError::UnexpectedElement(span) => {
@@ -357,6 +376,7 @@ impl std::fmt::Display for Span {
 }
 
 impl Span {
+    // TODO: Adjust diagnostic reporting to account for Unicode characters
     fn new(source: &str, start: usize, end: usize) -> Self {
         let mut row = 1;
         let mut col = 1;
@@ -754,6 +774,10 @@ impl<'a> TokenStream<'a> {
 
     fn slice(&self, start: usize, end: usize) -> &'a str {
         &self.source[start..end]
+    }
+
+    fn slice_from(&self, start: usize) -> &'a str {
+        &self.source[start..self.pos]
     }
 
     fn span(&self, start: usize, end: usize) -> Span {
@@ -1728,26 +1752,61 @@ fn parse_attribute<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> P
 }
 
 fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<&'a str> {
-    let delimiter: char = stream.consume_quote()?;
-    let start = stream.pos;
-
-    loop {
-        let current = stream.current_char()?;
-        match current {
-            d if d == delimiter => break,
-            '&' => {
-                parse_entity_reference(stream, ctx)?;
-            }
-            c if c == '<' || c == '&' => {
-                // TODO: Handle Character/Entity references
-                return Err(ParseError::UnexpectedCharacter(delimiter, c, stream.span_single()));
-            }
-            _ => stream.advance(current.len_utf8()),
+    fn normalize_char(c: char, normalized: &mut Vec<u8>) {
+        let len = c.len_utf8();
+        if len > 1 {
+            let mut bytes = vec![0; len];
+            c.encode_utf8(&mut bytes);
+            normalized.extend_from_slice(&bytes);
+        } else {
+            normalized.push(c as u8);
         }
     }
 
+    let delimiter = stream.consume_quote()?;
+    let start = stream.pos;
+
+    let mut normalized = vec![];
+    let mut owned = false;
+
+    loop {
+        let current = stream.current_char();
+        match current {
+            Ok(d) if d == delimiter => break,
+            Ok('\r' | '\n' | '\t') => {
+                owned = true;
+                normalized.push(b' ');
+                stream.advance(1);
+            }
+            Ok('&') if stream.peek_byte() == Ok(b'#') => {
+                owned = true;
+                let c = parse_character_reference(stream)?;
+                normalize_char(c, &mut normalized);
+            }
+            Ok('&') => {
+                owned = true;
+                let entity_ref = parse_entity_reference(stream, ctx)?;
+                if entity_ref.contains('&') {
+                    // TODO: Parse nested entity ref
+                } else {
+                    normalized.extend_from_slice(entity_ref.as_bytes());
+                }
+            }
+            Ok('<') => return Err(ParseError::UnescapedLTInAttrValue(stream.span_single())),
+            Ok(c) if !validate::is_xml_char(c) => return Err(ParseError::InvalidXmlChar(c, stream.span_single())),
+            Ok(c) => {
+                normalize_char(c, &mut normalized);
+                stream.advance(c.len_utf8())
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    // We should only break on the delimiter so this should not attempt to slice in the middle
+    // of a non-ascii character.
+    let value = stream.slice_from(start);
     stream.advance(1);
-    Ok(stream.slice(start, stream.pos - 1))
+    Ok(value)
 }
 
 // ETag  ::=  '</' QName S? '>'
@@ -1823,7 +1882,9 @@ fn parse_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
                 parse_element_end(stream, ctx)?;
                 break;
             }
-            b'&' => parse_entity_reference(stream, ctx)?,
+            b'&' => {
+                let _ = parse_entity_reference(stream, ctx)?;
+            }
             b'<' => parse_element(stream, ctx, ElementType::Child)?,
             _ => {
                 if stream.is_white_space()? {
@@ -1838,7 +1899,71 @@ fn parse_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
     Ok(())
 }
 
-fn parse_entity_reference<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+fn parse_character_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<char> {
+    let prefix_len = if stream.peek_seq("&#x") { 3 } else { 2 };
+    stream.advance(prefix_len);
+    let start = stream.pos;
+
+    let u32_value = if prefix_len == 3 {
+        loop {
+            match stream.current_byte()? {
+                b';' => break,
+                b if b.is_ascii_hexdigit() => stream.advance(1),
+                _ => {
+                    return Err(ParseError::InvalidCharRef(
+                        String::from("invalid hexadecimal value"),
+                        stream.span_single(),
+                    ));
+                }
+            }
+        }
+
+        match u32::from_str_radix(stream.slice_from(start), 16) {
+            Ok(value) => value,
+            Err(err) => return Err(ParseError::InvalidCharRef(err.to_string(), stream.span_single())),
+        }
+    } else {
+        loop {
+            match stream.current_byte()? {
+                b';' => break,
+                b if b.is_ascii_digit() => stream.advance(1),
+                _ => {
+                    return Err(ParseError::InvalidCharRef(
+                        String::from("invalid decimal value"),
+                        stream.span_single(),
+                    ));
+                }
+            }
+        }
+        match u32::from_str(stream.slice_from(start)) {
+            Ok(value) => value,
+            Err(err) => return Err(ParseError::InvalidCharRef(err.to_string(), stream.span_single())),
+        }
+    };
+
+    let c = match char::from_u32(u32_value) {
+        Some(c) => c,
+        None => {
+            return Err(ParseError::InvalidCharRef(
+                String::from("invalid char"),
+                stream.span(start, stream.pos),
+            ));
+        }
+    };
+
+    if !validate::is_xml_char(c) {
+        return Err(ParseError::InvalidCharRef(
+            format!("invalid char {c}"),
+            stream.span(start, stream.pos),
+        ));
+    }
+
+    stream.advance(1);
+
+    Ok(c)
+}
+
+fn parse_entity_reference<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<&'a str> {
     stream.expect_byte(b'&')?;
     let start = stream.pos;
     let name = parse_name(stream)?;
@@ -1849,10 +1974,7 @@ fn parse_entity_reference<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a
     }
 
     match ctx.entities.get(name) {
-        Some(value) => {
-            ctx.emit_token(stream, Token::EntityRef { name, value })?;
-            Ok(())
-        }
+        Some(value) => Ok(value),
         None => Err(ParseError::UnknownEntityReference(
             name.to_string(),
             stream.span(start, stream.pos),
@@ -2481,8 +2603,6 @@ mod test {
         );
     }
 
-    // ========== Attributes ==========
-
     #[test]
     fn test_parse_attribute() {
         let mut stream = stream_from(r#"b="c""#);
@@ -2495,5 +2615,62 @@ mod test {
     fn test_parse_element_duplicate_attribute() {
         let res = Parser::parse(r#"<name some="value" some="value"/>"#);
         assert!(matches!(res, Err(ParseError::DuplicateAttribute(_, _))));
+    }
+
+    #[test]
+    fn test_parse_char_ref_decimal() {
+        let mut stream = stream_from(r#"&#85;"#);
+        let res = parse_character_reference(&mut stream);
+        assert!(res.is_ok())
+    }
+
+    #[test]
+    fn test_parse_char_ref_invalid_decimal_digit() {
+        let mut stream = stream_from(r#"&#99a;"#);
+        let res = parse_character_reference(&mut stream);
+        assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_char_ref_invalid_decimal_out_of_bounds() {
+        // 0x110000
+        let mut stream = stream_from(r#"&#1114112;"#);
+        let res = parse_character_reference(&mut stream);
+        assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_char_ref_hexadecimal() {
+        let mut stream = stream_from(r#"&#x2f;"#);
+        let res = parse_character_reference(&mut stream);
+        assert!(res.is_ok())
+    }
+
+    #[test]
+    fn test_parse_char_ref_invalid_hexadecimal_digit() {
+        let mut stream = stream_from(r#"&#x11M22;"#);
+        let res = parse_character_reference(&mut stream);
+        assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_char_ref_invalid_hexadecimal_out_of_bounds() {
+        let mut stream = stream_from(r#"&#x110100;"#);
+        let res = parse_character_reference(&mut stream);
+        assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_char_ref_invalid_hexadecimal_invalid_xml_char() {
+        let mut stream = stream_from(r#"&#xfffe;"#);
+        let res = parse_character_reference(&mut stream);
+        assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_char_ref_unclosed() {
+        let mut stream = stream_from(r#"&#x22f"#);
+        let res = parse_character_reference(&mut stream);
+        assert!(res.is_err())
     }
 }
