@@ -1208,7 +1208,7 @@ fn parse_document<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
                 stream.advance(1);
             }
             b'<' if stream.starts_with("<?") => parse_processing_instruction(stream, ctx)?,
-            b'<' if stream.starts_with("<!-- ") => parse_comment(stream, ctx)?,
+            b'<' if stream.starts_with("<!--") => parse_comment(stream, ctx)?,
             // Start of the root node, break and parse outside of the loop.
             b'<' => break,
             _ => return Err(ParseError::WTF(stream.span_single())),
@@ -1308,7 +1308,7 @@ fn parse_misc<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseR
         match stream.unchecked_current_byte() {
             b' ' | b'\t' | b'\n' | b'\r' => stream.advance(1),
             b'<' if stream.starts_with("<?") => parse_processing_instruction(stream, ctx)?,
-            b'<' if stream.starts_with("<!-- ") => parse_comment(stream, ctx)?,
+            b'<' if stream.starts_with("<!--") => parse_comment(stream, ctx)?,
             _ => break,
         }
     }
@@ -1465,6 +1465,7 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
 
     stream.consume_whitespace();
     parse_external_id(stream, Optionality::Optional)?;
+    stream.consume_whitespace();
 
     if stream.current_byte()? == b'[' {
         stream.advance(1);
@@ -1479,10 +1480,13 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
                 b']' => break,
                 b'<' if stream.starts_with("<!ELEMENT") => parse_element_type_decl(stream, ctx)?,
                 b'<' if stream.starts_with("<!ENTITY") => parse_entity_decl(stream, ctx)?,
+                b'<' if stream.starts_with("<!ATTLIST") => unimplemented!("ATTLIST"),
+                b'<' if stream.starts_with("<!NOTATION") => unimplemented!("NOTATION"),
                 b'<' if stream.starts_with("<?") => parse_processing_instruction(stream, ctx)?,
-                b'<' if stream.starts_with("<!-- ") => parse_comment(stream, ctx)?,
+                b'<' if stream.starts_with("<!--") => parse_comment(stream, ctx)?,
                 _ if stream.is_white_space()? => stream.advance(1),
-                _ => return Err(ParseError::WTF(stream.span_single())),
+                b => panic!("{}", b as char),
+                // _ => return Err(ParseError::WTF(stream.span_single())),
             }
         }
 
@@ -2006,7 +2010,7 @@ fn parse_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
         match stream.unchecked_current_byte() {
             b'<' if stream.starts_with("<?") => parse_processing_instruction(stream, ctx)?,
             b'<' if stream.starts_with("<![CDATA[") => parse_cdata(stream, ctx)?,
-            b'<' if stream.starts_with("<!-- ") => parse_comment(stream, ctx)?,
+            b'<' if stream.starts_with("<!--") => parse_comment(stream, ctx)?,
             b'<' if stream.starts_with("</") => {
                 parse_element_end(stream, ctx)?;
                 break;
