@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<!DOCTYPE student SYSTEM "student.dtd"[
+<!DOCTYPE student SYSTEM "student_09v05.dtd"[
 	<!ELEMENT student (#PCDATA)> 
 	<!ENTITY Age "21">
 	<!ENTITY Status "freshman">
