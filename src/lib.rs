@@ -821,7 +821,8 @@ impl<'a> TokenStream<'a> {
         Ok(())
     }
 
-    fn consume_whitespace(&mut self) {
+    fn consume_whitespace(&mut self) -> usize {
+        let start = self.pos;
         while !self.is_at_end() {
             // We know we aren't at the end so this will not panic
             if !self.is_white_space().expect("unexpected EOF") {
@@ -830,6 +831,8 @@ impl<'a> TokenStream<'a> {
 
             self.advance(1);
         }
+
+        self.pos - start
     }
 
     fn consume_quote(&mut self) -> ParseResult<char> {
@@ -1152,6 +1155,12 @@ impl<'a> Context<'a> {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum Optionality {
+    Optional,
+    Required,
+}
+
 pub struct Parser;
 
 impl Parser {
@@ -1454,12 +1463,11 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     let name = parse_name(stream)?;
     ctx.doc.name = Some(name);
 
-    // TODO: ExternalId
-
     stream.consume_whitespace();
+    parse_external_id(stream, Optionality::Optional)?;
 
-    if let Ok(b'[') = stream.current_byte() {
-        stream.expect_byte(b'[')?;
+    if stream.current_byte()? == b'[' {
+        stream.advance(1);
 
         // Parse 'intSubset'
         loop {
@@ -1474,7 +1482,7 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
                 b'<' if stream.starts_with("<?") => parse_processing_instruction(stream, ctx)?,
                 b'<' if stream.starts_with("<!-- ") => parse_comment(stream, ctx)?,
                 _ if stream.is_white_space()? => stream.advance(1),
-                _ => todo!(),
+                _ => return Err(ParseError::WTF(stream.span_single())),
             }
         }
 
@@ -1485,6 +1493,73 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     stream.expect_byte(b'>')?;
 
     Ok(())
+}
+
+// ExternalID  ::=  'SYSTEM' S SystemLiteral | 'PUBLIC' S PubidLiteral S SystemLiteral
+fn parse_external_id<'a>(stream: &mut TokenStream<'a>, optionality: Optionality) -> ParseResult<()> {
+    if stream.peek_seq("SYSTEM") {
+        let _ = parse_system_identifier(stream)?;
+    } else if stream.peek_seq("PUBLIC") {
+        let _ = parse_public_identifier(stream)?;
+        stream.expect_and_consume_whitespace()?;
+        let _ = parse_system_identifier(stream)?;
+    } else if optionality == Optionality::Required {
+        panic!("Required ExternalID !");
+    }
+    Ok(())
+}
+
+// SystemLiteral  ::=  ('"' [^"]* '"') | ("'" [^']* "'")
+fn parse_system_identifier<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
+    stream.advance(6);
+    stream.expect_and_consume_whitespace()?;
+
+    let delimiter = stream.consume_quote()?;
+    let start = stream.pos;
+
+    loop {
+        let current = stream.current_char()?;
+        if current == delimiter {
+            break;
+        }
+
+        stream.advance(current.len_utf8());
+    }
+
+    // TODO: dereference to obtain input (this one is going low on the priority list lol)
+    let system_identifier = stream.slice_from(start);
+    stream.advance(1);
+    Ok(system_identifier)
+}
+
+// PubidLiteral  ::=  '"' PubidChar* '"' | "'" (PubidChar - "'")* "'"
+// PubidChar     ::=  #x20 | #xD | #xA | [a-zA-Z0-9] | [-'()+,./:=?;!*#@$_%]
+fn parse_public_identifier<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
+    stream.advance(6);
+    stream.expect_and_consume_whitespace()?;
+
+    let delimiter = stream.consume_quote()?;
+    let start = stream.pos;
+
+    loop {
+        let current = stream.current_char()?;
+        if current == delimiter {
+            break;
+        }
+
+        if !matches!(current, 'a'..='z' | 'A'..='Z' | '0'..='9' | ' ' | '\n' | '\r' | '-' | '\'' | '(' | ')'
+                        | '+' | ',' | '.' | '/' | ':' | '=' | '?' | ';' | '!' | '*' | '#' | '@' | '$' | '_' | '%')
+        {
+            // TODO actual error
+            return Err(ParseError::WTF(stream.span_single()));
+        }
+
+        stream.advance(current.len_utf8());
+    }
+
+    let pubid_literal = stream.slice_from(start);
+    stream.advance(1);
+    Ok(pubid_literal)
 }
 
 // elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
@@ -1605,28 +1680,82 @@ fn parse_parameter_entity_ref<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&
 // EntityDecl  ::=  GEDecl | PEDecl
 // GEDecl      ::=  '<!ENTITY' S Name S EntityDef S? '>'
 // PEDecl      ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
-// EntityDef   ::=  EntityValue | (ExternalID NDataDecl?)
-// PEDef       ::=  EntityValue | ExternalID
 fn parse_entity_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.advance(8);
     stream.expect_and_consume_whitespace()?;
 
-    let name = parse_name(stream)?;
-    stream.expect_and_consume_whitespace()?;
-    let value = match stream.current_char()? {
-        '\'' | '"' => parse_entity_value(stream, name)?,
-        b => return Err(ParseError::UnexpectedCharacter2("`'` or `\"`", b, stream.span_single())),
-    };
-
-    stream.expect_byte(b'>')?;
-
-    // If the same entity is declared more than once, the first declaration encountered is binding
-    if ctx.entities.contains_key(name) {
-        return Ok(());
+    if stream.current_byte()? == b'%' {
+        parse_pe_def(stream, ctx)?;
+    } else {
+        parse_entity_def(stream, ctx)?;
     }
 
-    ctx.entities.insert(name, value);
+    Ok(())
+}
 
+// PEDecl  ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
+// PEDef   ::=  EntityValue | ExternalID
+fn parse_pe_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+    stream.advance(1);
+    stream.expect_and_consume_whitespace()?;
+
+    let name = parse_name(stream)?;
+    stream.expect_and_consume_whitespace()?;
+
+    if let Ok(b'\'' | b'"') = stream.current_byte() {
+        // If the same entity is declared more than once, the first declaration encountered is binding
+        let value = parse_entity_value(stream, name)?;
+        if ctx.entities.contains_key(name) {
+            return Ok(());
+        }
+        ctx.entities.insert(name, value);
+    } else {
+        parse_external_id(stream, Optionality::Required)?;
+    }
+
+    stream.consume_whitespace();
+    stream.expect_byte(b'>')?;
+
+    Ok(())
+}
+
+// GEDecl      ::=  '<!ENTITY' S Name S EntityDef S? '>'
+// EntityDef   ::=  EntityValue | (ExternalID NDataDecl?)
+fn parse_entity_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+    let name = parse_name(stream)?;
+    stream.expect_and_consume_whitespace()?;
+
+    if let Ok(b'\'' | b'"') = stream.current_byte() {
+        // If the same entity is declared more than once, the first declaration encountered is binding
+        let value = parse_entity_value(stream, name)?;
+        if ctx.entities.contains_key(name) {
+            return Ok(());
+        }
+        ctx.entities.insert(name, value);
+    } else {
+        parse_external_id(stream, Optionality::Required)?;
+        let consumed = stream.consume_whitespace();
+        match stream.peek_seq("NDATA") {
+            true if consumed == 0 => panic!("Missing required whitespace before NDataDecl!"),
+            true => parse_ndata_decl(stream)?,
+            false => (),
+        }
+    }
+
+    stream.consume_whitespace();
+    stream.expect_byte(b'>')?;
+
+    Ok(())
+}
+
+// NDataDecl  ::=  S 'NDATA' S Name
+// If the NDataDecl is present, this is a general unparsed entity; otherwise it is a parsed entity.
+// VC: The Name MUST match the declared name of a notation.
+fn parse_ndata_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    // TODO: VC
+    stream.advance(5);
+    stream.expect_and_consume_whitespace()?;
+    let _name = parse_name(stream)?;
     Ok(())
 }
 
