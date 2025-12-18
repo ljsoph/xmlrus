@@ -821,6 +821,10 @@ impl<'a> TokenStream<'a> {
         Span::new(self.source, start, end)
     }
 
+    fn span_from(&self, start: usize) -> Span {
+        Span::new(self.source, start, self.pos)
+    }
+
     fn span_single(&self) -> Span {
         Span::new(self.source, self.pos, self.pos + 1)
     }
@@ -1111,7 +1115,7 @@ impl<'a> Context<'a> {
                                     let start = stream.pos - local.len() - value.len() - 3;
                                     return Err(ParseError::DuplicateAttribute(
                                         local.to_string(),
-                                        stream.span(start, stream.pos),
+                                        stream.span_from(start),
                                     ));
                                 }
 
@@ -1395,10 +1399,7 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
         if value == "yes" || value == "no" {
             Some(value)
         } else {
-            return Err(ParseError::InvalidStandalone(
-                value.to_owned(),
-                stream.span(start, stream.pos),
-            ));
+            return Err(ParseError::InvalidStandalone(value.to_owned(), stream.span_from(start)));
         }
     } else {
         None
@@ -1521,7 +1522,6 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
                 b'<' if stream.starts_with("<!--") => parse_comment(stream, ctx)?,
                 _ if stream.is_white_space()? => stream.advance(1),
                 b => panic!("{}", b as char),
-                // _ => return Err(ParseError::WTF(stream.span_single())),
             }
         }
 
@@ -1545,10 +1545,7 @@ fn parse_notation_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     let start = stream.pos;
     let name = parse_name(stream)?;
     if ctx.notations.contains_key(name) {
-        return Err(ParseError::DuplicateNotation(
-            name.to_string(),
-            stream.span(start, stream.pos),
-        ));
+        return Err(ParseError::DuplicateNotation(name.to_string(), stream.span_from(start)));
     }
 
     stream.expect_and_consume_whitespace("notation name")?;
@@ -1598,7 +1595,7 @@ fn parse_notation_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     } else {
         return Err(ParseError::InvalidNotationDecl(
             "missing ExternalId or PublicId",
-            stream.span(start, stream.pos),
+            stream.span_from(start),
         ));
     }
 
@@ -1723,7 +1720,7 @@ fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'
             });
         }
     } else {
-        return Err(ParseError::InvalidElementTypeDecl(stream.span(start, stream.pos)));
+        return Err(ParseError::InvalidElementTypeDecl(stream.span_from(start)));
     }
 
     stream.consume_whitespace();
@@ -1748,13 +1745,14 @@ fn parse_mixed_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, 
                 stream.advance(1);
                 stream.consume_whitespace();
 
+                let name_start = stream.pos;
                 let name = parse_name(stream)?;
 
                 // The same name MUST NOT appear more than once in a single mixed-content declaration.
                 if names.contains(&name) {
                     return Err(ParseError::DuplicateMixedContent(
                         name.to_string(),
-                        stream.span(stream.pos - name.len(), stream.pos),
+                        stream.span_from(name_start),
                     ));
                 }
 
@@ -1974,7 +1972,7 @@ fn parse_element_start<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     if let Some(prefix) = prefix
         && prefix == XMLNS_PREFIX
     {
-        return Err(ParseError::ReservedPrefix(stream.span(start, stream.pos)));
+        return Err(ParseError::ReservedPrefix(stream.span_from(start)));
     }
 
     Ok(Token::ElementStart { prefix, local })
@@ -2097,10 +2095,7 @@ fn parse_qname<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Parse
 
     // 'xml' prefix will be mapped to 'http://www.w3.org/XML/1998/namespace'
     if prefix != XML_PREFIX && !stream.has_prefix(ctx, prefix) {
-        return Err(ParseError::UnknownPrefix(
-            prefix.to_owned(),
-            stream.span(start, stream.pos),
-        ));
+        return Err(ParseError::UnknownPrefix(prefix.to_owned(), stream.span_from(start)));
     }
 
     stream.expect_byte(b':')?;
@@ -2188,7 +2183,7 @@ fn parse_character_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<ch
         None => {
             return Err(ParseError::InvalidCharRef(
                 String::from("invalid char"),
-                stream.span(start, stream.pos),
+                stream.span_from(start),
             ));
         }
     };
@@ -2196,7 +2191,7 @@ fn parse_character_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<ch
     if !validate::is_xml_char(c) {
         return Err(ParseError::InvalidCharRef(
             format!("invalid char {c}"),
-            stream.span(start, stream.pos),
+            stream.span_from(start),
         ));
     }
 
@@ -2219,7 +2214,7 @@ fn parse_entity_reference<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a
         Some(value) => Ok(value),
         None => Err(ParseError::UnknownEntityReference(
             name.to_string(),
-            stream.span(start, stream.pos),
+            stream.span_from(start),
         )),
     }
 }
