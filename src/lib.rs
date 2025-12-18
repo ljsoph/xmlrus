@@ -25,6 +25,11 @@ pub enum ParseError {
     /// The same name MUST NOT appear more than once in a single mixed-content declaration.
     DuplicateMixedContent(String, Span),
 
+    /// Duplicate Notation Declared
+    ///
+    /// A given Name MUST NOT be declared in more than one notation declaration.
+    DuplicateNotation(String, Span),
+
     /// Invalid Character Data
     ///
     /// Unescaped ampersands (`&`) and left angle brackets (`<`) will be parsed as separate errors.
@@ -55,6 +60,9 @@ pub enum ParseError {
     /// Invalid Namespace character
     InvalidNamespaceChar(char, Span),
 
+    /// Invalid Notation Decl
+    InvalidNotationDecl(&'static str, Span),
+
     /// Invalid Root Name
     ///
     /// If a `DTD` is present, the root element name must match the `DOCTYPE`.
@@ -82,6 +90,9 @@ pub enum ParseError {
     ///
     /// A Document must have at least one element
     MissingRoot,
+
+    /// Missing Required Whitespace
+    MissingRequiredWhitespace(&'static str, Span),
 
     /// Reserved Namespace
     ///
@@ -171,7 +182,15 @@ impl std::fmt::Display for ParseError {
             ParseError::DuplicateMixedContent(element, span) => {
                 writeln!(
                     f,
-                    "error:{}:{}: duplicate name '{}' in mixed-content declaration",
+                    "error:{}:{}: duplicate mixed-content '{}' declared",
+                    span.row, span.col_start, element
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::DuplicateNotation(element, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: duplicate notataion '{}' declared",
                     span.row, span.col_start, element
                 )?;
                 writeln!(f, "{span}")
@@ -228,6 +247,10 @@ impl std::fmt::Display for ParseError {
                 )?;
                 writeln!(f, "{span}")
             }
+            ParseError::InvalidNotationDecl(reason, span) => {
+                writeln!(f, "error:{}:{}: invalid notation: {}", span.row, span.col_start, reason)?;
+                writeln!(f, "{span}")
+            }
             ParseError::InvalidRootName(expected, actual, span) => {
                 writeln!(
                     f,
@@ -263,6 +286,14 @@ impl std::fmt::Display for ParseError {
             }
             ParseError::MissingRoot => {
                 writeln!(f, "error: no root element found")
+            }
+            ParseError::MissingRequiredWhitespace(item, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: space required after '{item}'",
+                    span.row, span.col_start
+                )?;
+                writeln!(f, "{span}")
             }
             ParseError::ReservedPrefix(span) => {
                 writeln!(
@@ -460,6 +491,12 @@ struct TempElementData<'a> {
     attributes: Vec<Attribute<'a>>,
     id: usize,
     parent_id: Option<usize>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Notation<'a> {
+    system_id: Option<&'a str>,
+    public_id: Option<&'a str>,
 }
 
 #[derive(PartialEq)]
@@ -793,13 +830,9 @@ impl<'a> TokenStream<'a> {
         Ok(matches!(current, 0x20 | 0x9 | 0xD | 0xA))
     }
 
-    fn expect_and_consume_whitespace(&mut self) -> ParseResult<()> {
+    fn expect_and_consume_whitespace(&mut self, item: &'static str) -> ParseResult<()> {
         if !self.is_white_space()? {
-            return Err(ParseError::UnexpectedCharacter2(
-                "whitespace",
-                self.unchecked_current_byte() as char,
-                self.span_single(),
-            ));
+            return Err(ParseError::MissingRequiredWhitespace(item, self.span_single()));
         }
 
         self.consume_whitespace();
@@ -887,6 +920,7 @@ pub struct Context<'a> {
     doc: Document<'a>,
     temp_elements: Vec<TempElementData<'a>>,
     entities: HashMap<&'a str, &'a str>,
+    notations: HashMap<&'a str, Notation<'a>>,
     element_types: Vec<ElementTypeDecl<'a>>,
     current_node_id: usize,
 }
@@ -1176,6 +1210,7 @@ impl Parser {
             doc,
             temp_elements: Vec::new(),
             entities: HashMap::new(),
+            notations: HashMap::new(),
             element_types: Vec::new(),
             current_node_id: 0,
         };
@@ -1458,12 +1493,12 @@ fn parse_processing_instruction<'a>(stream: &mut TokenStream<'a>, ctx: &mut Cont
 // markupdecl  ::=   elementdecl | AttlistDecl | EntityDecl | NotationDecl | PI | Comment
 fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.advance(9);
-    stream.expect_and_consume_whitespace()?;
+    stream.expect_and_consume_whitespace("<!DOCTYPE")?;
 
     let name = parse_name(stream)?;
     ctx.doc.name = Some(name);
-
     stream.consume_whitespace();
+
     parse_external_id(stream, Optionality::Optional)?;
     stream.consume_whitespace();
 
@@ -1481,7 +1516,7 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
                 b'<' if stream.starts_with("<!ELEMENT") => parse_element_type_decl(stream, ctx)?,
                 b'<' if stream.starts_with("<!ENTITY") => parse_entity_decl(stream, ctx)?,
                 b'<' if stream.starts_with("<!ATTLIST") => unimplemented!("ATTLIST"),
-                b'<' if stream.starts_with("<!NOTATION") => unimplemented!("NOTATION"),
+                b'<' if stream.starts_with("<!NOTATION") => parse_notation_decl(stream, ctx)?,
                 b'<' if stream.starts_with("<?") => parse_processing_instruction(stream, ctx)?,
                 b'<' if stream.starts_with("<!--") => parse_comment(stream, ctx)?,
                 _ if stream.is_white_space()? => stream.advance(1),
@@ -1499,14 +1534,96 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     Ok(())
 }
 
+// NotationDecl  ::=  '<!NOTATION' S Name S (ExternalID | PublicID) S? '>'
+// PublicID      ::=  'PUBLIC' S PubidLiteral
+//
+// Validity constraint: Unique Notation Name
+fn parse_notation_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+    stream.advance(10);
+    stream.expect_and_consume_whitespace("<!NOTATION")?;
+
+    let start = stream.pos;
+    let name = parse_name(stream)?;
+    if ctx.notations.contains_key(name) {
+        return Err(ParseError::DuplicateNotation(
+            name.to_string(),
+            stream.span(start, stream.pos),
+        ));
+    }
+
+    stream.expect_and_consume_whitespace("notation name")?;
+
+    // Three paths we can take
+    // 1: SYSTEM SystemLiteral
+    // 2: PUBLIC PubidLiteral
+    // 3: PUBLIC PubidLiteral SystemLiteral
+    if stream.peek_seq("SYSTEM") {
+        stream.advance(6);
+        stream.expect_and_consume_whitespace("SYSTEM")?;
+        let system_id = parse_system_literal(stream)?;
+        ctx.notations.insert(
+            name,
+            Notation {
+                system_id: Some(system_id),
+                public_id: None,
+            },
+        );
+    } else if stream.peek_seq("PUBLIC") {
+        stream.advance(6);
+        stream.expect_and_consume_whitespace("PUBLIC")?;
+
+        let public_id = parse_public_id_literal(stream)?;
+        let consumed = stream.consume_whitespace();
+        let system_id = match stream.current_byte()? {
+            b'\'' | b'"' => {
+                if consumed == 0 {
+                    return Err(ParseError::MissingRequiredWhitespace(
+                        "public id literal",
+                        stream.span_single(),
+                    ));
+                }
+
+                Some(parse_system_literal(stream)?)
+            }
+            _ => None,
+        };
+
+        ctx.notations.insert(
+            name,
+            Notation {
+                system_id,
+                public_id: Some(public_id),
+            },
+        );
+    } else {
+        return Err(ParseError::InvalidNotationDecl(
+            "missing ExternalId or PublicId",
+            stream.span(start, stream.pos),
+        ));
+    }
+
+    stream.consume_whitespace();
+    stream.expect_byte(b'>')?;
+
+    Ok(())
+}
+
 // ExternalID  ::=  'SYSTEM' S SystemLiteral | 'PUBLIC' S PubidLiteral S SystemLiteral
 fn parse_external_id<'a>(stream: &mut TokenStream<'a>, optionality: Optionality) -> ParseResult<()> {
     if stream.peek_seq("SYSTEM") {
-        let _ = parse_system_identifier(stream)?;
+        stream.advance(6);
+        stream.expect_and_consume_whitespace("SYSTEM")?;
+
+        let _ = parse_system_literal(stream)?;
     } else if stream.peek_seq("PUBLIC") {
-        let _ = parse_public_identifier(stream)?;
-        stream.expect_and_consume_whitespace()?;
-        let _ = parse_system_identifier(stream)?;
+        stream.advance(6);
+        stream.expect_and_consume_whitespace("PUBLIC")?;
+
+        let _ = parse_public_id_literal(stream)?;
+
+        stream.expect_and_consume_whitespace("public identifier")?;
+
+        let _ = parse_system_literal(stream)?;
     } else if optionality == Optionality::Required {
         panic!("Required ExternalID !");
     }
@@ -1514,10 +1631,7 @@ fn parse_external_id<'a>(stream: &mut TokenStream<'a>, optionality: Optionality)
 }
 
 // SystemLiteral  ::=  ('"' [^"]* '"') | ("'" [^']* "'")
-fn parse_system_identifier<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
-    stream.advance(6);
-    stream.expect_and_consume_whitespace()?;
-
+fn parse_system_literal<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
     let delimiter = stream.consume_quote()?;
     let start = stream.pos;
 
@@ -1538,10 +1652,7 @@ fn parse_system_identifier<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a 
 
 // PubidLiteral  ::=  '"' PubidChar* '"' | "'" (PubidChar - "'")* "'"
 // PubidChar     ::=  #x20 | #xD | #xA | [a-zA-Z0-9] | [-'()+,./:=?;!*#@$_%]
-fn parse_public_identifier<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
-    stream.advance(6);
-    stream.expect_and_consume_whitespace()?;
-
+fn parse_public_id_literal<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
     let delimiter = stream.consume_quote()?;
     let start = stream.pos;
 
@@ -1571,13 +1682,11 @@ fn parse_public_identifier<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a 
 fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.advance(9);
 
-    stream.expect_and_consume_whitespace()?;
+    stream.expect_and_consume_whitespace("<!ELEMENT")?;
     let start = stream.pos;
     let name = parse_name(stream)?;
 
-    if stream.expect_and_consume_whitespace().is_err() {
-        return Err(ParseError::InvalidElementTypeDecl(stream.span(start + 1, stream.pos)));
-    }
+    stream.expect_and_consume_whitespace("element name")?;
 
     // An element type MUST NOT be declared more than once.
     if ctx.element_types.iter().any(|el| el.name == name) {
@@ -1686,7 +1795,7 @@ fn parse_parameter_entity_ref<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&
 // PEDecl      ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
 fn parse_entity_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.advance(8);
-    stream.expect_and_consume_whitespace()?;
+    stream.expect_and_consume_whitespace("<!ENTITY")?;
 
     if stream.current_byte()? == b'%' {
         parse_pe_def(stream, ctx)?;
@@ -1701,10 +1810,10 @@ fn parse_entity_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) ->
 // PEDef   ::=  EntityValue | ExternalID
 fn parse_pe_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.advance(1);
-    stream.expect_and_consume_whitespace()?;
+    stream.expect_and_consume_whitespace("%")?;
 
     let name = parse_name(stream)?;
-    stream.expect_and_consume_whitespace()?;
+    stream.expect_and_consume_whitespace("parameter entity name")?;
 
     if let Ok(b'\'' | b'"') = stream.current_byte() {
         // If the same entity is declared more than once, the first declaration encountered is binding
@@ -1727,7 +1836,7 @@ fn parse_pe_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pars
 // EntityDef   ::=  EntityValue | (ExternalID NDataDecl?)
 fn parse_entity_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     let name = parse_name(stream)?;
-    stream.expect_and_consume_whitespace()?;
+    stream.expect_and_consume_whitespace("entity def name")?;
 
     if let Ok(b'\'' | b'"') = stream.current_byte() {
         // If the same entity is declared more than once, the first declaration encountered is binding
@@ -1758,7 +1867,7 @@ fn parse_entity_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> 
 fn parse_ndata_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
     // TODO: VC
     stream.advance(5);
-    stream.expect_and_consume_whitespace()?;
+    stream.expect_and_consume_whitespace("NDATA")?;
     let _name = parse_name(stream)?;
     Ok(())
 }
@@ -2356,6 +2465,7 @@ mod test {
             },
             temp_elements: Vec::new(),
             entities: HashMap::new(),
+            notations: HashMap::new(),
             element_types: Vec::new(),
             current_node_id: 0,
         }
@@ -2379,6 +2489,7 @@ mod test {
                 parent_id: None,
             }],
             entities: HashMap::new(),
+            notations: HashMap::new(),
             element_types: Vec::new(),
             current_node_id: 0,
         }
@@ -2804,6 +2915,101 @@ mod test {
     fn test_parse_char_ref_unclosed() {
         let mut stream = stream_from(r#"&#x22f"#);
         let res = parse_character_reference(&mut stream);
+        assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_notation_decl_system_only() {
+        let mut stream = stream_from(r#"<!NOTATION gif SYSTEM "hello.gif">"#);
+        let mut ctx = context();
+        let res = parse_notation_decl(&mut stream, &mut ctx);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_parse_notation_decl_public_only() {
+        let mut stream = stream_from(r#"<!NOTATION gif PUBLIC 'hello.gif'>"#);
+        let mut ctx = context();
+        let res = parse_notation_decl(&mut stream, &mut ctx);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_parse_notation_decl_public_system() {
+        let mut stream = stream_from(r#"<!NOTATION gif PUBLIC 'hello.gif' "sure why not">"#);
+        let mut ctx = context();
+        let res = parse_notation_decl(&mut stream, &mut ctx);
+        assert!(res.is_ok())
+    }
+
+    #[test]
+    fn test_parse_notation_decl_unclosed_quote() {
+        let mut stream = stream_from(r#"<!NOTATION gif SYSTEM 'hello.gif">"#);
+        let mut ctx = context();
+        let res = parse_notation_decl(&mut stream, &mut ctx);
+        assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_notation_decl_public_system_missing_space() {
+        let mut stream = stream_from(r#"<!NOTATION gif PUBLIC 'hello.gif'"sure why not">"#);
+        let mut ctx = context();
+        let res = parse_notation_decl(&mut stream, &mut ctx);
+        assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_notation_decl_extra_whitespace() {
+        let mut stream = stream_from("<!NOTATION  \t  gif \nSYSTEM \"hello.gif\"       >");
+        let mut ctx = context();
+        let res = parse_notation_decl(&mut stream, &mut ctx);
+        assert!(res.is_ok())
+    }
+
+    #[test]
+    fn test_parse_notation_decl_missing_whitespace_after_decl() {
+        let mut stream = stream_from("<!NOTATIONgif SYSTEM \"hello.gif\">");
+        let mut ctx = context();
+        let res = parse_notation_decl(&mut stream, &mut ctx);
+        assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_notation_decl_missing_whitespace_after_name() {
+        let mut stream = stream_from("<!NOTATION gifSYSTEM\"hello.gif\">");
+        let mut ctx = context();
+        let res = parse_notation_decl(&mut stream, &mut ctx);
+        assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_notation_decl_missing_external_or_public_id() {
+        let mut stream = stream_from("<!NOTATION gif \"hello.gif\">");
+        let mut ctx = context();
+        let res = parse_notation_decl(&mut stream, &mut ctx);
+        assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_notation_decl_missing_external_or_public_id_2() {
+        let mut stream = stream_from("<!NOTATION gif NOTSYSTEM \"hello.gif\">");
+        let mut ctx = context();
+        let res = parse_notation_decl(&mut stream, &mut ctx);
+        assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_notation_duplicate_decl() {
+        let mut stream = stream_from("<!NOTATION gif NOTSYSTEM \"hello.gif\">");
+        let mut ctx = context();
+        ctx.notations.insert(
+            "gif",
+            Notation {
+                system_id: Some("hello.gif"),
+                public_id: None,
+            },
+        );
+        let res = parse_notation_decl(&mut stream, &mut ctx);
         assert!(res.is_err())
     }
 }
