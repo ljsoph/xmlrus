@@ -1227,7 +1227,7 @@ impl Parser {
 
         parse_document(&mut stream, &mut ctx)?;
 
-        dbg!(ctx.element_types);
+        // dbg!(ctx.element_types);
 
         Ok(ctx.doc)
     }
@@ -1991,6 +1991,11 @@ fn parse_attribute<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> P
     Ok(())
 }
 
+enum StrSlice<'a> {
+    Borrowed(&'a str),
+    Owned(String),
+}
+
 fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<&'a str> {
     fn normalize_char(c: char, normalized: &mut Vec<u8>) {
         let len = c.len_utf8();
@@ -2046,6 +2051,20 @@ fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>
     // of a non-ascii character.
     let value = stream.slice_from(start);
     stream.advance(1);
+
+    if owned {
+        println!(
+            "OWNED: {}",
+            String::from_utf8(normalized).expect("Attribute value contains invalid UTF-8"),
+        );
+        // Ok(StrSlice::Owned(
+        //     String::from_utf8(normalized).expect("Attribute value contains invalid UTF-8"),
+        // ))
+    } else {
+        println!("BORROWED: {value}");
+        // Ok(StrSlice::Borrowed(value))
+    }
+
     Ok(value)
 }
 

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE Manifest [
+    <!ENTITY what "what">
+    <!ENTITY name "a name">
+    <!ELEMENT name EMPTY>
+    <!ELEMENT yo ANY>
+    <!ELEMENT hi (#PCDATA | hello | world)*>
+    <!ELEMENT div1 (head, (p | list | note)*, div2*)>
+    <!-- <!ELEMENT dictionary-body (%div.mix; | %dict.mix;)*> -->
+]>
+
+<!-- Im a comment 
+     you're a comment
+-->
+
+<Manifest>
+    hello
+    <a foo="what🐑 the" bar="&name;">who are you? &name; okay</a>
+    <b foo="a&#xaf;">hi</b>
+    world
+</Manifest>
