@@ -9,7 +9,7 @@ fn source(test_file: &str) -> String {
 fn test_unclosed_root() {
     let source = source("unclosed_root");
     let res = xmlrus::Parser::parse(&source);
-    assert!(matches!(res, Err(ParseError::UnclosedRoot)))
+    assert!(matches!(res, Err(ParseError::UnexpectedEndOfStream)))
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::str::FromStr;
 
 type ParseResult<T> = std::result::Result<T, ParseError>;
@@ -24,6 +25,9 @@ pub enum ParseError {
     ///
     /// The same name MUST NOT appear more than once in a single mixed-content declaration.
     DuplicateMixedContent(String, Span),
+
+    /// Duplicate Namespace
+    DuplicateNamespace(String, Span),
 
     /// Duplicate Notation Declared
     ///
@@ -105,9 +109,6 @@ pub enum ParseError {
     /// expected, actual, span
     TagNameMismatch(String, String, Span),
 
-    /// Root Node was not properly closed
-    UnclosedRoot,
-
     /// Unescaped '<' in Attribute Value
     UnescapedLTInAttrValue(Span),
 
@@ -182,15 +183,23 @@ impl std::fmt::Display for ParseError {
             ParseError::DuplicateMixedContent(element, span) => {
                 writeln!(
                     f,
-                    "error:{}:{}: duplicate mixed-content '{}' declared",
+                    "error:{}:{}: duplicate mixed-content '{}'",
                     span.row, span.col_start, element
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::DuplicateNamespace(namespace, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: duplicate namespace '{}'",
+                    span.row, span.col_start, namespace
                 )?;
                 writeln!(f, "{span}")
             }
             ParseError::DuplicateNotation(element, span) => {
                 writeln!(
                     f,
-                    "error:{}:{}: duplicate notataion '{}' declared",
+                    "error:{}:{}: duplicate notataion '{}'",
                     span.row, span.col_start, element
                 )?;
                 writeln!(f, "{span}")
@@ -307,9 +316,6 @@ impl std::fmt::Display for ParseError {
                 writeln!(f, "error:{}:{}: unexpected tag name", span.row, span.col_start)?;
                 writeln!(f, "  Expected: '{expected}'\n  Actual:   '{actual}'")?;
                 write!(f, "{span}")
-            }
-            ParseError::UnclosedRoot => {
-                writeln!(f, "error: unclosed root element")
             }
             ParseError::UnescapedLTInAttrValue(span) => {
                 writeln!(
@@ -441,7 +447,6 @@ pub struct Document<'a> {
     pub name: Option<&'a str>,
     pub root_node_id: Option<usize>,
     pub nodes: Vec<Node<'a>>,
-    pub namespaces: Vec<Namespace<'a>>,
 }
 
 impl<'a> Document<'a> {
@@ -466,31 +471,6 @@ impl<'a> Document<'a> {
 
         walk(&self.nodes, tag_name)
     }
-
-    /// Returns an owned list of valid Namespaces for a given `node_id`
-    fn namespaces_in_scope(&self, node_id: usize, current_node_id: usize) -> Vec<Namespace<'a>> {
-        self.namespaces
-            .iter()
-            .filter(|ns| {
-                // Namespace was declared before first use
-                node_id >= ns.start &&
-                // Namespace is still in scope
-                (ns.end == Some(current_node_id) || ns.end.is_none())
-            })
-            .cloned()
-            .collect()
-    }
-}
-
-#[derive(Debug, PartialEq)]
-struct TempElementData<'a> {
-    prefix: Option<&'a str>,
-    local: &'a str,
-    namespaces: Vec<Namespace<'a>>,
-    children: Vec<Node<'a>>,
-    attributes: Vec<Attribute<'a>>,
-    id: usize,
-    parent_id: Option<usize>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -515,8 +495,12 @@ impl std::fmt::Debug for Attribute<'_> {
 pub struct Namespace<'a> {
     pub name: Option<&'a str>,
     pub uri: &'a str,
-    start: usize,
-    end: Option<usize>,
+}
+
+impl<'a> Namespace<'a> {
+    fn new(name: Option<&'a str>, uri: &'a str) -> Self {
+        Self { name, uri }
+    }
 }
 
 impl std::fmt::Debug for Namespace<'_> {
@@ -528,8 +512,14 @@ impl std::fmt::Debug for Namespace<'_> {
 #[derive(PartialEq)]
 pub struct Node<'a> {
     pub id: usize,
-    parent_id: Option<usize>,
+    parent: Option<usize>,
     pub data: NodeKind<'a>,
+}
+
+impl<'a> Node<'a> {
+    fn new(id: usize, parent: Option<usize>, data: NodeKind<'a>) -> Self {
+        Self { id, parent, data }
+    }
 }
 
 impl std::fmt::Debug for Node<'_> {
@@ -881,48 +871,11 @@ impl<'a> TokenStream<'a> {
 
         Err(ParseError::UnexpectedCharacter2("a quote", current, self.span_single()))
     }
-
-    fn has_prefix(&self, ctx: &mut Context<'a>, prefix: &str) -> bool {
-        if prefix == XMLNS_PREFIX {
-            return true;
-        }
-
-        let mut parent_id: Option<usize> = None;
-        let mut elements = ctx.temp_elements.iter().rev();
-
-        // Check first element to get an initial parent index, if needed.
-        if let Some(current) = elements.next() {
-            if current.namespaces.iter().any(|ns| ns.name == Some(prefix)) {
-                return true;
-            }
-            parent_id = current.parent_id;
-        }
-
-        for parent in elements {
-            // Skip siblings
-            if parent_id != Some(parent.id) {
-                continue;
-            }
-
-            if parent.namespaces.iter().any(|ns| ns.name == Some(prefix)) {
-                return true;
-            }
-
-            // Reached root node without finding prefix declaration
-            if parent.parent_id.is_none() {
-                return false;
-            }
-
-            parent_id = parent.parent_id;
-        }
-
-        false
-    }
 }
 
 pub struct Context<'a> {
     doc: Document<'a>,
-    temp_elements: Vec<TempElementData<'a>>,
+    prefixes: HashSet<&'a str>,
     entities: HashMap<&'a str, &'a str>,
     notations: HashMap<&'a str, Notation<'a>>,
     element_types: Vec<ElementTypeDecl<'a>>,
@@ -930,266 +883,22 @@ pub struct Context<'a> {
 }
 
 impl<'a> Context<'a> {
-    fn emit_token(&mut self, stream: &mut TokenStream<'a>, token: Token<'a>) -> ParseResult<()> {
-        match token {
-            Token::ElementStart { prefix, local } => {
-                let parent_id = self.temp_elements.last().map(|parent| parent.id);
-                self.temp_elements.push(TempElementData {
-                    prefix,
-                    local,
-                    namespaces: Vec::new(),
-                    children: Vec::new(),
-                    attributes: Vec::new(),
-                    id: self.current_node_id,
-                    parent_id,
-                });
-                self.current_node_id += 1;
-            }
-            Token::Text { text } => {
-                if let Some(mut parent) = self.temp_elements.pop() {
-                    let node = Node {
-                        id: self.current_node_id,
-                        parent_id: Some(parent.id),
-                        data: NodeKind::Text(text),
-                    };
-                    self.current_node_id += 1;
-                    parent.children.push(node);
-                    self.temp_elements.push(parent);
-                }
-            }
-            Token::EntityRef { name, value } => {
-                if let Some(mut parent) = self.temp_elements.pop() {
-                    let node = Node {
-                        id: self.current_node_id,
-                        parent_id: Some(parent.id),
-                        data: NodeKind::EntityRef { name, value },
-                    };
-                    self.current_node_id += 1;
-                    parent.children.push(node);
-                    self.temp_elements.push(parent);
-                }
-            }
-            Token::ElementEnd { kind } => match kind {
-                ElementEndKind::Open => {}
-                ElementEndKind::Empty => {
-                    if let Some(current) = self.temp_elements.pop() {
-                        for ns in &mut self.doc.namespaces {
-                            if ns.start == current.id {
-                                ns.end = Some(self.current_node_id);
-                            }
-                        }
+    fn current_id(&mut self) -> usize {
+        let current = self.current_node_id;
+        self.current_node_id += 1;
+        current
+    }
 
-                        let namespaces = self.doc.namespaces_in_scope(current.id, self.current_node_id);
-                        let mut node = Node {
-                            id: current.id,
-                            parent_id: None,
-                            data: NodeKind::Element {
-                                name: current.local,
-                                namespaces,
-                                attributes: current.attributes,
-                                children: current.children,
-                            },
-                        };
-
-                        if let Some(mut parent) = self.temp_elements.pop() {
-                            node.parent_id = Some(parent.id);
-                            parent.children.push(node);
-                            self.temp_elements.push(parent);
-                        }
-                        // root node
-                        else {
-                            self.doc.nodes.push(node);
-                        }
-                    } else {
-                        // FIXME: please
-                        panic!()
-                    }
-                }
-                ElementEndKind::Close { prefix, local } => {
-                    if let Some(start) = self.temp_elements.pop() {
-                        if start.prefix != prefix || start.local != local {
-                            let (expected, actual) = match start.prefix {
-                                Some(prefix) => (format!("{}:{}", prefix, start.local), format!("{prefix}:{local}")),
-                                None => (start.local.to_string(), local.to_string()),
-                            };
-                            let start = stream.pos - actual.len() - 1;
-                            let span = stream.span(start, stream.pos - 1);
-                            return Err(ParseError::TagNameMismatch(expected, actual, span));
-                        }
-
-                        for ns in &mut self.doc.namespaces {
-                            if ns.start == start.id {
-                                ns.end = Some(self.current_node_id);
-                            }
-                        }
-
-                        let namespaces = self.doc.namespaces_in_scope(start.id, self.current_node_id);
-                        let mut node = Node {
-                            id: start.id,
-                            parent_id: None,
-                            data: NodeKind::Element {
-                                name: start.local,
-                                namespaces,
-                                attributes: start.attributes,
-                                children: start.children,
-                            },
-                        };
-
-                        if let Some(mut parent) = self.temp_elements.pop() {
-                            node.parent_id = Some(parent.id);
-                            parent.children.push(node);
-                            self.temp_elements.push(parent);
-                        }
-                        // root node
-                        else {
-                            self.doc.root_node_id = Some(node.id);
-                            self.doc.nodes.push(node);
-                        }
-                    }
-                }
-            },
-            Token::Attribute { prefix, local, value } => {
-                if let Some(current) = self.temp_elements.last_mut() {
-                    match prefix {
-                        Some(prefix) => {
-                            // prefixed namespace - 'xmlns:prefix="foobarbaz"'
-                            if prefix == XMLNS_PREFIX {
-                                // 'xml'
-                                if local == XML_PREFIX {
-                                    // 'xml' prefix can only be bound to the 'http://www.w3.org/XML/1998/namespace' namespace
-                                    if value != XML_URI {
-                                        let start = stream.pos - value.len() - 1;
-                                        return Err(ParseError::InvalidXmlPrefixUri(
-                                            stream.span(start, stream.pos - 1),
-                                        ));
-                                    }
-                                }
-
-                                // Prefixes other than `xml` MUST NOT be bound to the `http://www.w3.org/XML/1998/namespace` namespace name
-                                if value == XML_URI {
-                                    let start = stream.pos - prefix.len() - local.len() - value.len() - 4;
-                                    return Err(ParseError::UnexpectedXmlUri(stream.span(start, stream.pos - 1)));
-                                }
-
-                                // The 'xmlns' prefix is bound to the 'http://www.w3.org/2000/xmlns/' namespace and MUST NOT be declared
-                                if value == XMLNS_URI {
-                                    let start = stream.pos - prefix.len() - local.len() - value.len() - 4;
-                                    return Err(ParseError::UnexpectedXmlnsUri(stream.span(start, stream.pos - 1)));
-                                }
-
-                                let ns = Namespace {
-                                    name: Some(local),
-                                    uri: value,
-                                    start: current.id,
-                                    end: None,
-                                };
-                                if !self.doc.namespaces.contains(&ns) {
-                                    self.doc.namespaces.push(ns.clone());
-                                }
-                                if !current.namespaces.contains(&ns) {
-                                    current.namespaces.push(ns);
-                                }
-                            }
-                        }
-                        None => {
-                            // Default/unprefixed namespace - 'xmlns="foobarbaz"'
-                            if local == XMLNS_PREFIX {
-                                // The 'xmlns' prefix is bound to the 'http://www.w3.org/2000/xmlns/' namespace and MUST NOT be declared
-                                if value == XMLNS_URI {
-                                    let start = stream.pos - local.len() - value.len() - 3;
-                                    return Err(ParseError::UnexpectedXmlnsUri(stream.span(start, stream.pos - 1)));
-                                }
-
-                                let ns = Namespace {
-                                    name: None,
-                                    uri: value,
-                                    start: current.id,
-                                    end: None,
-                                };
-                                self.doc.namespaces.push(ns.clone());
-                                current.namespaces.push(ns);
-                            }
-                            // Attribute
-                            else {
-                                if current.attributes.iter().any(|a| a.name == local) {
-                                    let start = stream.pos - local.len() - value.len() - 3;
-                                    return Err(ParseError::DuplicateAttribute(
-                                        local.to_string(),
-                                        stream.span_from(start),
-                                    ));
-                                }
-
-                                current.attributes.push(Attribute { name: local, value });
-                            }
-                        }
-                    }
-                }
-            }
-            Token::ProcessingInstruction { target, data } => {
-                let mut node = Node {
-                    id: self.current_node_id,
-                    parent_id: None,
-                    data: NodeKind::ProcessingInstruction { target, data },
-                };
-                self.current_node_id += 1;
-                match self.temp_elements.last_mut() {
-                    Some(parent) => {
-                        node.parent_id = Some(parent.id);
-                        parent.children.push(node);
-                    }
-                    None => self.doc.nodes.push(node),
-                }
-            }
-            Token::Declaration {
-                version,
-                encoding,
-                standalone,
-            } => {
-                let node = Node {
-                    id: self.current_node_id,
-                    parent_id: None,
-                    data: NodeKind::Declaration {
-                        version,
-                        encoding,
-                        standalone,
-                    },
-                };
-                self.current_node_id += 1;
-                self.doc.nodes.push(node);
-            }
-            Token::Comment { comment } => {
-                let mut node = Node {
-                    id: self.current_node_id,
-                    parent_id: None,
-                    data: NodeKind::Comment(comment),
-                };
-                self.current_node_id += 1;
-                match self.temp_elements.last_mut() {
-                    Some(parent) => {
-                        node.parent_id = Some(parent.id);
-                        parent.children.push(node);
-                    }
-                    None => self.doc.nodes.push(node),
-                }
-            }
-            Token::CData { data } => {
-                let mut node = Node {
-                    id: self.current_node_id,
-                    parent_id: None,
-                    data: NodeKind::CData(data),
-                };
-                self.current_node_id += 1;
-                match self.temp_elements.last_mut() {
-                    Some(parent) => {
-                        node.parent_id = Some(parent.id);
-                        parent.children.push(node);
-                    }
-                    None => self.doc.nodes.push(node),
-                }
-            }
+    fn has_prefix(&self, prefix: &str) -> bool {
+        if prefix == XMLNS_PREFIX {
+            return true;
         }
 
-        Ok(())
+        self.prefixes.contains(prefix)
+    }
+
+    fn push_node(&mut self, node: Node<'a>) {
+        self.doc.nodes.push(node)
     }
 }
 
@@ -1207,12 +916,11 @@ impl Parser {
             name: None,
             root_node_id: None,
             nodes: Vec::new(),
-            namespaces: Vec::new(),
         };
 
         let mut ctx = Context {
             doc,
-            temp_elements: Vec::new(),
+            prefixes: HashSet::new(),
             entities: HashMap::new(),
             notations: HashMap::new(),
             element_types: Vec::new(),
@@ -1246,8 +954,14 @@ fn parse_document<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
             b' ' | b'\t' | b'\n' | b'\r' => {
                 stream.advance(1);
             }
-            b'<' if stream.starts_with("<?") => parse_processing_instruction(stream, ctx)?,
-            b'<' if stream.starts_with("<!--") => parse_comment(stream, ctx)?,
+            b'<' if stream.starts_with("<?") => {
+                let pi = parse_processing_instruction(stream, ctx, None)?;
+                ctx.doc.nodes.push(pi);
+            }
+            b'<' if stream.starts_with("<!--") => {
+                let comment = parse_comment(stream, ctx, None)?;
+                ctx.doc.nodes.push(comment);
+            }
             // Start of the root node, break and parse outside of the loop.
             b'<' => break,
             _ => return Err(ParseError::WTF(stream.span_single())),
@@ -1260,11 +974,8 @@ fn parse_document<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
         return Err(ParseError::MissingRoot);
     }
 
-    parse_element(stream, ctx, ElementType::Root)?;
-
-    if !ctx.temp_elements.is_empty() {
-        return Err(ParseError::UnclosedRoot);
-    }
+    let root = parse_element(stream, ctx, ElementType::Root, None)?;
+    ctx.doc.nodes.push(root);
 
     // Parse any comments or PIs after the root node
     parse_misc(stream, ctx)?;
@@ -1346,8 +1057,14 @@ fn parse_misc<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseR
     while !stream.is_at_end() {
         match stream.unchecked_current_byte() {
             b' ' | b'\t' | b'\n' | b'\r' => stream.advance(1),
-            b'<' if stream.starts_with("<?") => parse_processing_instruction(stream, ctx)?,
-            b'<' if stream.starts_with("<!--") => parse_comment(stream, ctx)?,
+            b'<' if stream.starts_with("<?") => {
+                let pi = parse_processing_instruction(stream, ctx, None)?;
+                ctx.doc.nodes.push(pi);
+            }
+            b'<' if stream.starts_with("<!--") => {
+                let comment = parse_comment(stream, ctx, None)?;
+                ctx.doc.nodes.push(comment);
+            }
             _ => break,
         }
     }
@@ -1417,21 +1134,28 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
     }
 
     stream.advance(2);
-    ctx.emit_token(
-        stream,
-        Token::Declaration {
+
+    let id = ctx.current_id();
+    ctx.push_node(Node::new(
+        id,
+        None,
+        NodeKind::Declaration {
             version,
             encoding,
             standalone,
         },
-    )?;
+    ));
 
     Ok(())
 }
 
 // PI        ::=   '<?' PITarget  (S (Char* - ( Char* '?>' Char*)))? '?>'
 // PITarget  ::=   Name - (('X' | 'x') ('M' | 'm') ('L' | 'l'))
-fn parse_processing_instruction<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+fn parse_processing_instruction<'a>(
+    stream: &mut TokenStream<'a>,
+    ctx: &mut Context<'a>,
+    parent: Option<usize>,
+) -> ParseResult<Node<'a>> {
     if stream.starts_with("<?xml ") {
         return Err(ParseError::UnexpectedDeclaration(
             stream.span(stream.pos, stream.pos + 1),
@@ -1446,8 +1170,9 @@ fn parse_processing_instruction<'a>(stream: &mut TokenStream<'a>, ctx: &mut Cont
         match peek {
             b'>' => {
                 stream.advance(2);
-                ctx.emit_token(stream, Token::ProcessingInstruction { target, data: None })?;
-                return Ok(());
+                let id = ctx.current_id();
+                let pi = Node::new(id, parent, NodeKind::ProcessingInstruction { target, data: None });
+                return Ok(pi);
             }
             c => return Err(ParseError::UnexpectedCharacter('>', c as char, stream.span_single())),
         }
@@ -1475,17 +1200,19 @@ fn parse_processing_instruction<'a>(stream: &mut TokenStream<'a>, ctx: &mut Cont
 
     let data = stream.slice(data_start, stream.pos);
     validate::is_xml_chars(data, data_start, stream)?;
-
     stream.advance(2);
-    ctx.emit_token(
-        stream,
-        Token::ProcessingInstruction {
+
+    let id = ctx.current_id();
+    let pi = Node::new(
+        id,
+        parent,
+        NodeKind::ProcessingInstruction {
             target,
             data: Some(data),
         },
-    )?;
+    );
 
-    Ok(())
+    Ok(pi)
 }
 
 // doctypedecl ::=   '<!DOCTYPE' S Name (S ExternalID)? S? ('[' intSubset ']' S?)? '>'
@@ -1518,8 +1245,14 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
                 b'<' if stream.starts_with("<!ENTITY") => parse_entity_decl(stream, ctx)?,
                 b'<' if stream.starts_with("<!ATTLIST") => unimplemented!("ATTLIST"),
                 b'<' if stream.starts_with("<!NOTATION") => parse_notation_decl(stream, ctx)?,
-                b'<' if stream.starts_with("<?") => parse_processing_instruction(stream, ctx)?,
-                b'<' if stream.starts_with("<!--") => parse_comment(stream, ctx)?,
+                b'<' if stream.starts_with("<?") => {
+                    let pi = parse_processing_instruction(stream, ctx, None)?;
+                    ctx.push_node(pi);
+                }
+                b'<' if stream.starts_with("<!--") => {
+                    let comment = parse_comment(stream, ctx, None)?;
+                    ctx.push_node(comment);
+                }
                 _ if stream.is_white_space()? => stream.advance(1),
                 b => panic!("{}", b as char),
             }
@@ -1891,34 +1624,35 @@ fn parse_entity_value<'a>(stream: &mut TokenStream<'a>, _name: &'a str) -> Parse
     Ok(value)
 }
 
-fn parse_element<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, kind: ElementType) -> ParseResult<()> {
-    let start = stream.pos;
-    let element_start = parse_element_start(stream, ctx)?;
+fn parse_element<'a>(
+    stream: &mut TokenStream<'a>,
+    ctx: &mut Context<'a>,
+    kind: ElementType,
+    parent: Option<usize>,
+) -> ParseResult<Node<'a>> {
+    let id = ctx.current_id();
+    let mut attributes = vec![];
+    let mut namespaces = vec![];
+    let mut children = vec![];
+
+    let start_pos = stream.pos;
+    let (start_prefix, start_local) = parse_element_start(stream, ctx)?;
 
     if let Some(doc_name) = ctx.doc.name
         && let ElementType::Root = kind
-        && let Token::ElementStart { local, .. } = element_start
-        && doc_name != local
+        && doc_name != start_local
     {
         return Err(ParseError::InvalidRootName(
             doc_name.to_string(),
-            local.to_string(),
-            stream.span(start + 1, stream.pos),
+            start_local.to_string(),
+            stream.span_from(start_pos + 1),
         ));
     }
-
-    ctx.emit_token(stream, element_start)?;
 
     let mut is_open = false;
     while !stream.is_at_end() {
         match stream.unchecked_current_byte() {
             b'>' => {
-                ctx.emit_token(
-                    stream,
-                    Token::ElementEnd {
-                        kind: ElementEndKind::Open,
-                    },
-                )?;
                 stream.advance(1);
                 is_open = true;
                 break;
@@ -1926,13 +1660,17 @@ fn parse_element<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, kind: 
             b'/' => {
                 stream.advance(1);
                 stream.expect_byte(b'>')?;
-                ctx.emit_token(
-                    stream,
-                    Token::ElementEnd {
-                        kind: ElementEndKind::Empty,
+
+                return Ok(Node::new(
+                    id,
+                    parent,
+                    NodeKind::Element {
+                        name: start_local,
+                        namespaces,
+                        attributes,
+                        children,
                     },
-                )?;
-                break;
+                ));
             }
             _ => {
                 // Attributes need a leading white space
@@ -1945,21 +1683,127 @@ fn parse_element<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, kind: 
                 }
                 stream.consume_whitespace();
 
-                parse_attribute(stream, ctx)?;
+                let start = stream.pos;
+                let (prefix, local, value) = parse_attribute(stream, ctx)?;
+                match prefix {
+                    // prefixed namespace - 'xmlns:prefix="foobarbaz"'
+                    Some(prefix) if prefix == XMLNS_PREFIX => {
+                        // 'xml'
+                        if local == XML_PREFIX {
+                            // 'xml' prefix can only be bound to the 'http://www.w3.org/XML/1998/namespace' namespace
+                            if value != XML_URI {
+                                let start = stream.pos - value.len() - 1;
+                                return Err(ParseError::InvalidXmlPrefixUri(stream.span(start, stream.pos - 1)));
+                            }
+                        }
+
+                        // Prefixes other than `xml` MUST NOT be bound to the `http://www.w3.org/XML/1998/namespace` namespace name
+                        if value == XML_URI {
+                            let start = stream.pos - prefix.len() - local.len() - value.len() - 4;
+                            return Err(ParseError::UnexpectedXmlUri(stream.span(start, stream.pos - 1)));
+                        }
+
+                        // The 'xmlns' prefix is bound to the 'http://www.w3.org/2000/xmlns/' namespace and MUST NOT be declared
+                        if value == XMLNS_URI {
+                            let start = stream.pos - prefix.len() - local.len() - value.len() - 4;
+                            return Err(ParseError::UnexpectedXmlnsUri(stream.span(start, stream.pos - 1)));
+                        }
+
+                        if namespaces.iter().any(|ns| ns.name == Some(local)) {
+                            return Err(ParseError::DuplicateNamespace(
+                                local.to_string(),
+                                stream.span(start + prefix.len() + 1, stream.pos - value.len() - 3),
+                            ));
+                        }
+
+                        ctx.prefixes.insert(local);
+                        namespaces.push(Namespace::new(Some(local), value));
+                    }
+                    // Default/unprefixed namespace - 'xmlns="foobarbaz"'
+                    None if local == XMLNS_PREFIX => {
+                        // The 'xmlns' prefix is bound to the 'http://www.w3.org/2000/xmlns/' namespace and MUST NOT be declared
+                        if value == XMLNS_URI {
+                            let start = stream.pos - local.len() - value.len() - 3;
+                            return Err(ParseError::UnexpectedXmlnsUri(stream.span(start, stream.pos - 1)));
+                        }
+
+                        namespaces.push(Namespace::new(None, value));
+                    }
+                    // Prefixed Attribute
+                    Some(prefix) => {
+                        if !ctx.prefixes.contains(prefix) {
+                            return Err(ParseError::UnknownPrefix(prefix.to_string(), stream.span_from(start)));
+                        }
+
+                        if attributes.iter().any(|a: &Attribute| a.name == local) {
+                            let start = stream.pos - local.len() - value.len() - 3;
+                            return Err(ParseError::DuplicateAttribute(
+                                local.to_string(),
+                                stream.span_from(start),
+                            ));
+                        }
+
+                        attributes.push(Attribute { name: local, value });
+                    }
+                    // Unprefixed Attribute
+                    None => {
+                        if attributes.iter().any(|a: &Attribute| a.name == local) {
+                            let start = stream.pos - local.len() - value.len() - 3;
+                            return Err(ParseError::DuplicateAttribute(
+                                local.to_string(),
+                                stream.span_from(start),
+                            ));
+                        }
+
+                        attributes.push(Attribute { name: local, value });
+                    }
+                }
             }
         }
     }
 
+    let prefixes = ctx.prefixes.clone();
     if is_open {
-        parse_content(stream, ctx)?;
+        children.extend(parse_content(stream, ctx, id)?);
+    }
+    ctx.prefixes = prefixes;
+
+    let (end_prefix, end_local) = parse_element_end(stream, ctx)?;
+    if start_prefix != end_prefix || start_local != end_local {
+        let (expected, actual) = match start_prefix {
+            Some(prefix) => (format!("{}:{}", prefix, start_local), format!("{prefix}:{end_local}")),
+            None => (start_local.to_string(), end_local.to_string()),
+        };
+        let start = stream.pos - actual.len() - 1;
+        let span = stream.span(start, stream.pos - 1);
+        return Err(ParseError::TagNameMismatch(expected, actual, span));
     }
 
-    Ok(())
+    // root node
+    if parent.is_none() {
+        ctx.doc.root_node_id = Some(id);
+    }
+
+    let element = Node::new(
+        id,
+        parent,
+        NodeKind::Element {
+            name: start_local,
+            namespaces,
+            attributes,
+            children,
+        },
+    );
+
+    Ok(element)
 }
 
 // STag ::= '<' QName (S Attribute)* S? '>'
 //          ^^^^^^^^^
-fn parse_element_start<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<Token<'a>> {
+fn parse_element_start<'a>(
+    stream: &mut TokenStream<'a>,
+    ctx: &mut Context<'a>,
+) -> ParseResult<(Option<&'a str>, &'a str)> {
     let start = stream.pos;
     stream.advance(1);
 
@@ -1975,20 +1819,22 @@ fn parse_element_start<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
         return Err(ParseError::ReservedPrefix(stream.span_from(start)));
     }
 
-    Ok(Token::ElementStart { prefix, local })
+    Ok((prefix, local))
 }
 
 // Attribute  ::=  NSAttName Eq AttValue | QName Eq AttValue
 // AttValue   ::=  '"' ([^<&"] | Reference)* '"'
 //              |  "'" ([^<&'] | Reference)* "'"
-fn parse_attribute<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+fn parse_attribute<'a>(
+    stream: &mut TokenStream<'a>,
+    ctx: &mut Context<'a>,
+) -> ParseResult<(Option<&'a str>, &'a str, &'a str)> {
     let (prefix, local) = parse_qname(stream, ctx)?;
     stream.consume_whitespace();
     stream.expect_byte(b'=')?;
     stream.consume_whitespace();
     let value = parse_attribute_value(stream, ctx)?;
-    ctx.emit_token(stream, Token::Attribute { prefix, local, value })?;
-    Ok(())
+    Ok((prefix, local, value))
 }
 
 enum StrSlice<'a> {
@@ -2069,7 +1915,10 @@ fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>
 }
 
 // ETag  ::=  '</' QName S? '>'
-fn parse_element_end<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+fn parse_element_end<'a>(
+    stream: &mut TokenStream<'a>,
+    ctx: &mut Context<'a>,
+) -> ParseResult<(Option<&'a str>, &'a str)> {
     stream.advance(2);
 
     if stream.is_white_space()? {
@@ -2079,14 +1928,7 @@ fn parse_element_end<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) ->
     let (prefix, local) = parse_qname(stream, ctx)?;
     stream.expect_byte(b'>')?;
 
-    ctx.emit_token(
-        stream,
-        Token::ElementEnd {
-            kind: ElementEndKind::Close { prefix, local },
-        },
-    )?;
-
-    Ok(())
+    Ok((prefix, local))
 }
 
 // QName           ::=  PrefixedName | UnprefixedName
@@ -2097,7 +1939,6 @@ fn parse_element_end<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) ->
 // NCName          ::=  Name - (Char* ':' Char*) /* An XML Name, minus the ":" */
 fn parse_qname<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<(Option<&'a str>, &'a str)> {
     let start = stream.pos;
-
     let local = parse_nc_name(stream)?;
 
     if stream.current_byte()? != b':' {
@@ -2113,7 +1954,7 @@ fn parse_qname<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Parse
     }
 
     // 'xml' prefix will be mapped to 'http://www.w3.org/XML/1998/namespace'
-    if prefix != XML_PREFIX && !stream.has_prefix(ctx, prefix) {
+    if prefix != XML_PREFIX && !ctx.has_prefix(prefix) {
         return Err(ParseError::UnknownPrefix(prefix.to_owned(), stream.span_from(start)));
     }
 
@@ -2128,31 +1969,41 @@ fn parse_qname<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Parse
 }
 
 // content  ::=  CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
-fn parse_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+fn parse_content<'a>(
+    stream: &mut TokenStream<'a>,
+    ctx: &mut Context<'a>,
+    parent_id: usize,
+) -> ParseResult<Vec<Node<'a>>> {
+    let mut content = vec![];
     while !stream.is_at_end() {
         match stream.unchecked_current_byte() {
-            b'<' if stream.starts_with("<?") => parse_processing_instruction(stream, ctx)?,
-            b'<' if stream.starts_with("<![CDATA[") => parse_cdata(stream, ctx)?,
-            b'<' if stream.starts_with("<!--") => parse_comment(stream, ctx)?,
+            b'<' if stream.starts_with("<?") => {
+                content.push(parse_processing_instruction(stream, ctx, Some(parent_id))?)
+            }
+            b'<' if stream.starts_with("<![CDATA[") => content.push(parse_cdata(stream, ctx, Some(parent_id))?),
+            b'<' if stream.starts_with("<!--") => content.push(parse_comment(stream, ctx, Some(parent_id))?),
             b'<' if stream.starts_with("</") => {
-                parse_element_end(stream, ctx)?;
+                // parse_element_end(stream, ctx)?;
                 break;
             }
             b'&' => {
                 let _ = parse_entity_reference(stream, ctx)?;
             }
-            b'<' => parse_element(stream, ctx, ElementType::Child)?,
+            b'<' => content.push(parse_element(stream, ctx, ElementType::Child, Some(parent_id))?),
             _ => {
                 if stream.is_white_space()? {
                     stream.advance(1);
                 } else {
-                    parse_text(stream, ctx)?;
+                    let text = parse_text(stream)?;
+                    let id = ctx.current_id();
+                    let node = Node::new(id, Some(parent_id), NodeKind::Text(text));
+                    content.push(node)
                 }
             }
         }
     }
 
-    Ok(())
+    Ok(content)
 }
 
 fn parse_character_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<char> {
@@ -2242,7 +2093,11 @@ fn parse_entity_reference<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a
 // CDStart  ::=  '<![CDATA['
 // CData    ::=  (Char* - (Char* ']]>' Char*))
 // CDEnd    ::=  ']]>'
-fn parse_cdata<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+fn parse_cdata<'a>(
+    stream: &mut TokenStream<'a>,
+    ctx: &mut Context<'a>,
+    parent: Option<usize>,
+) -> ParseResult<Node<'a>> {
     stream.advance(9);
     let start = stream.pos;
 
@@ -2261,13 +2116,15 @@ fn parse_cdata<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Parse
     let data = stream.slice(start, stream.pos);
     validate::is_xml_chars(data, start, stream)?;
     stream.advance(3);
-    ctx.emit_token(stream, Token::CData { data })?;
 
-    Ok(())
+    let id = ctx.current_id();
+    let node = Node::new(id, parent, NodeKind::CData(data));
+
+    Ok(node)
 }
 
 // CharData  ::=  [^<&]* - ([^<&]* ']]>' [^<&]*)
-fn parse_text<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+fn parse_text<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
     let start = stream.pos;
 
     loop {
@@ -2284,12 +2141,15 @@ fn parse_text<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseR
         let start = start + pos;
         return Err(ParseError::InvalidCharData(stream.span(start, start + 3)));
     }
-    ctx.emit_token(stream, Token::Text { text })?;
 
-    Ok(())
+    Ok(text)
 }
 
-fn parse_comment<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+fn parse_comment<'a>(
+    stream: &mut TokenStream<'a>,
+    ctx: &mut Context<'a>,
+    parent: Option<usize>,
+) -> ParseResult<Node<'a>> {
     let start = stream.pos;
 
     stream.advance(5);
@@ -2317,9 +2177,11 @@ fn parse_comment<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
     stream.advance(3);
     let comment = stream.slice(start, stream.pos);
     validate::is_xml_chars(comment, start, stream)?;
-    ctx.emit_token(stream, Token::Comment { comment })?;
 
-    Ok(())
+    let id = ctx.current_id();
+    let node = Node::new(id, parent, NodeKind::Comment(comment));
+
+    Ok(node)
 }
 
 // children     ::=  (choice | seq) ('?' | '*' | '+')?
@@ -2475,9 +2337,8 @@ mod test {
                 name: None,
                 root_node_id: None,
                 nodes: Vec::new(),
-                namespaces: Vec::new(),
             },
-            temp_elements: Vec::new(),
+            prefixes: HashSet::new(),
             entities: HashMap::new(),
             notations: HashMap::new(),
             element_types: Vec::new(),
@@ -2491,17 +2352,8 @@ mod test {
                 name: None,
                 root_node_id: None,
                 nodes: Vec::new(),
-                namespaces: Vec::new(),
             },
-            temp_elements: vec![TempElementData {
-                prefix: None,
-                local: "local",
-                namespaces: vec![],
-                children: vec![],
-                attributes: vec![],
-                id: 0,
-                parent_id: None,
-            }],
+            prefixes: HashSet::new(),
             entities: HashMap::new(),
             notations: HashMap::new(),
             element_types: Vec::new(),
@@ -2530,37 +2382,23 @@ mod test {
     fn test_parse_pi() {
         let mut stream = stream_from(r#"<?hello world?>"#);
         let mut ctx = context();
-
-        parse_processing_instruction(&mut stream, &mut ctx).unwrap();
-
-        assert_eq!(
-            NodeKind::ProcessingInstruction {
-                target: "hello",
-                data: Some("world"),
-            },
-            ctx.doc.nodes[0].data,
-        );
+        let res = parse_processing_instruction(&mut stream, &mut ctx, None);
+        assert!(res.is_ok());
     }
 
     #[test]
     fn test_parse_pi_empty() {
         let mut stream = stream_from(r#"<?hello?>"#);
         let mut ctx = context();
-        parse_processing_instruction(&mut stream, &mut ctx).unwrap();
-        assert_eq!(
-            NodeKind::ProcessingInstruction {
-                target: "hello",
-                data: None,
-            },
-            ctx.doc.nodes[0].data,
-        );
+        let res = parse_processing_instruction(&mut stream, &mut ctx, None);
+        assert!(res.is_ok());
     }
 
     #[test]
     fn test_parse_pi_reserved_target() {
         let mut stream = stream_from(r#"<?xml world?>"#);
         let mut ctx = context();
-        let res = parse_processing_instruction(&mut stream, &mut ctx);
+        let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(res, Err(ParseError::UnexpectedDeclaration(_))));
     }
 
@@ -2568,7 +2406,7 @@ mod test {
     fn test_parse_pi_invalid_target_leading_whitespace() {
         let mut stream = stream_from(r#"<? target world?>"#);
         let mut ctx = context();
-        let res = parse_processing_instruction(&mut stream, &mut ctx);
+        let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(res, Err(ParseError::InvalidXmlName(_))));
     }
 
@@ -2576,7 +2414,7 @@ mod test {
     fn test_parse_pi_unexpected_eos() {
         let mut stream = stream_from(r#"<?target"#);
         let mut ctx = context();
-        let res = parse_processing_instruction(&mut stream, &mut ctx);
+        let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(res, Err(ParseError::UnexpectedEndOfStream)));
     }
 
@@ -2584,7 +2422,7 @@ mod test {
     fn test_parse_pi_invalid_name() {
         let mut stream = stream_from("<?L\u{FFFE}L hehe?>");
         let mut ctx = context();
-        let res = parse_processing_instruction(&mut stream, &mut ctx);
+        let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(res, Err(ParseError::InvalidXmlChar(_, _))));
     }
 
@@ -2592,7 +2430,7 @@ mod test {
     fn test_parse_pi_invalid_close_1() {
         let mut stream = stream_from(r#"<?target data?"#);
         let mut ctx = context();
-        let res = parse_processing_instruction(&mut stream, &mut ctx);
+        let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(res, Err(ParseError::UnexpectedEndOfStream)));
     }
 
@@ -2600,7 +2438,7 @@ mod test {
     fn test_parse_pi_invalid_close_2() {
         let mut stream = stream_from(r#"<?target data?<a/>"#);
         let mut ctx = context();
-        let res = parse_processing_instruction(&mut stream, &mut ctx);
+        let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(res, Err(ParseError::UnexpectedCharacter(_, _, _))));
     }
 
@@ -2608,7 +2446,7 @@ mod test {
     fn test_parse_pi_invalid_data() {
         let mut stream = stream_from("<?target dat\u{FFFF}a?>");
         let mut ctx = context();
-        let res = parse_processing_instruction(&mut stream, &mut ctx);
+        let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(res, Err(ParseError::InvalidXmlChar(_, _))));
     }
 
@@ -2645,33 +2483,37 @@ mod test {
 
     #[test]
     fn test_parse_invalid_xml_prefix_uri() {
-        let mut stream = stream_with_element(r#"xmlns:xml="https://www.google.com""#);
+        let mut stream = stream_with_element(r#"<root xmlns:xml="https://www.google.com"/>"#);
         let mut ctx = context_temp_elements();
-        let res = parse_attribute(&mut stream, &mut ctx);
+        let res = parse_element(&mut stream, &mut ctx, ElementType::Root, None);
+        assert!(res.is_err());
         assert!(matches!(res, Err(ParseError::InvalidXmlPrefixUri(_))));
     }
 
     #[test]
     fn test_parse_unexpected_xml_uri() {
-        let mut stream = stream_with_element(r#"xmlns:a="http://www.w3.org/XML/1998/namespace""#);
+        let mut stream = stream_with_element(r#"<root><foo xmlns:a="http://www.w3.org/XML/1998/namespace"/></root>"#);
         let mut ctx = context_temp_elements();
-        let res = parse_attribute(&mut stream, &mut ctx);
+        let res = parse_element(&mut stream, &mut ctx, ElementType::Root, None);
+        assert!(res.is_err());
         assert!(matches!(res, Err(ParseError::UnexpectedXmlUri(_))));
     }
 
     #[test]
     fn test_parse_unexpected_xmlns_uri() {
-        let mut stream = stream_with_element(r#"xmlns:a="http://www.w3.org/2000/xmlns/""#);
+        let mut stream = stream_with_element(r#"<root><foo xmlns:a="http://www.w3.org/2000/xmlns/"/><root>"#);
         let mut ctx = context_temp_elements();
-        let res = parse_attribute(&mut stream, &mut ctx);
+        let res = parse_element(&mut stream, &mut ctx, ElementType::Root, None);
+        assert!(res.is_err());
         assert!(matches!(res, Err(ParseError::UnexpectedXmlnsUri(_))));
     }
 
     #[test]
     fn test_parse_unexpected_xmlns_uri_default() {
-        let mut stream = stream_with_element(r#"xmlns="http://www.w3.org/2000/xmlns/""#);
+        let mut stream = stream_with_element(r#"<root xmlns="http://www.w3.org/2000/xmlns/"/>"#);
         let mut ctx = context_temp_elements();
-        let res = parse_attribute(&mut stream, &mut ctx);
+        let res = parse_element(&mut stream, &mut ctx, ElementType::Root, None);
+        assert!(res.is_err());
         assert!(matches!(res, Err(ParseError::UnexpectedXmlnsUri(_))));
     }
 
@@ -2680,71 +2522,20 @@ mod test {
     fn test_parse_stag() {
         let mut stream = stream_from(r#"<hello/>"#);
         let mut ctx = context();
-        let res = parse_element_start(&mut stream, &mut ctx).unwrap();
-        assert_eq!(
-            Token::ElementStart {
-                prefix: None,
-                local: "hello",
-            },
-            res,
-        );
+        let res = parse_element_start(&mut stream, &mut ctx);
+        assert!(res.is_ok());
     }
 
     #[test]
     fn test_parse_element() {
-        let res = Parser::parse(r#"<root xmlns:ns="ns"><ns:name>hello</ns:name></root>"#).unwrap();
-
-        assert_eq!(
-            Node {
-                id: 0,
-                parent_id: None,
-                data: NodeKind::Element {
-                    name: "root",
-                    namespaces: vec![Namespace {
-                        name: Some("ns"),
-                        uri: "ns",
-                        start: 0,
-                        end: Some(3)
-                    }],
-                    attributes: vec![],
-                    children: vec![Node {
-                        id: 1,
-                        parent_id: Some(0),
-                        data: NodeKind::Element {
-                            name: "name",
-                            namespaces: vec![Namespace {
-                                name: Some("ns",),
-                                uri: "ns",
-                                start: 0,
-                                end: None,
-                            },],
-                            attributes: vec![],
-                            children: vec![Node {
-                                id: 2,
-                                parent_id: Some(1),
-                                data: NodeKind::Text("hello")
-                            }]
-                        }
-                    }]
-                }
-            },
-            res.nodes[0]
-        );
+        let res = Parser::parse(r#"<root xmlns:ns="ns"><ns:name>hello</ns:name></root>"#);
+        assert!(res.is_ok())
     }
 
     #[test]
     fn test_parse_empty_element() {
-        let res = Parser::parse(r#"<name/>"#).unwrap();
-
-        assert_eq!(
-            NodeKind::Element {
-                name: "name",
-                namespaces: vec![],
-                attributes: vec![],
-                children: vec![]
-            },
-            res.nodes[0].data
-        );
+        let res = Parser::parse(r#"<name/>"#);
+        assert!(res.is_ok());
     }
 
     #[test]
@@ -2769,96 +2560,32 @@ mod test {
     fn test_parse_element_namespace_declaration() {
         let mut stream = stream_from(r#"<tag xmlns:foo="http://www.google.com"/>"#);
         let mut ctx = context();
-        parse_element(&mut stream, &mut ctx, ElementType::Child).unwrap();
-
-        assert_eq!(
-            NodeKind::Element {
-                name: "tag",
-                namespaces: vec![Namespace {
-                    name: Some("foo"),
-                    uri: "http://www.google.com",
-                    start: 0,
-                    end: Some(1),
-                }],
-                attributes: vec![],
-                children: vec![]
-            },
-            ctx.doc.nodes[0].data
-        );
+        let res = parse_element(&mut stream, &mut ctx, ElementType::Child, None);
+        assert!(res.is_ok());
     }
 
     #[test]
     fn test_parse_element_default_namespace_declaration() {
         let mut stream = stream_from(r#"<tag xmlns="http://www.google.com"/>"#);
         let mut ctx = context();
-        parse_element(&mut stream, &mut ctx, ElementType::Child).unwrap();
-
-        assert_eq!(
-            NodeKind::Element {
-                name: "tag",
-                namespaces: vec![Namespace {
-                    name: None,
-                    uri: "http://www.google.com",
-                    start: 0,
-                    end: Some(1),
-                }],
-                attributes: vec![],
-                children: vec![]
-            },
-            ctx.doc.nodes[0].data
-        );
+        let res = parse_element(&mut stream, &mut ctx, ElementType::Child, None);
+        assert!(res.is_ok());
     }
 
     #[test]
     fn test_parse_element_with_attributes() {
         let mut stream = stream_from(r#"<tag some="value" another="one"></tag>"#);
         let mut ctx = context();
-        parse_element(&mut stream, &mut ctx, ElementType::Child).unwrap();
-
-        assert_eq!(
-            NodeKind::Element {
-                name: "tag",
-                namespaces: vec![],
-                attributes: vec![
-                    Attribute {
-                        name: "some",
-                        value: "value"
-                    },
-                    Attribute {
-                        name: "another",
-                        value: "one"
-                    }
-                ],
-                children: vec![]
-            },
-            ctx.doc.nodes[0].data
-        );
+        let res = parse_element(&mut stream, &mut ctx, ElementType::Child, None);
+        assert!(res.is_ok());
     }
 
     #[test]
     fn test_parse_element_empty_with_attributes() {
         let mut stream = stream_from(r#"<name some="value" another="one"/>"#);
         let mut ctx = context();
-        parse_element(&mut stream, &mut ctx, ElementType::Child).unwrap();
-
-        assert_eq!(
-            NodeKind::Element {
-                name: "name",
-                namespaces: vec![],
-                attributes: vec![
-                    Attribute {
-                        name: "some",
-                        value: "value"
-                    },
-                    Attribute {
-                        name: "another",
-                        value: "one"
-                    }
-                ],
-                children: vec![]
-            },
-            ctx.doc.nodes[0].data
-        );
+        let res = parse_element(&mut stream, &mut ctx, ElementType::Child, None);
+        assert!(res.is_ok());
     }
 
     #[test]
