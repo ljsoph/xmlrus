@@ -113,7 +113,7 @@ mod ibm_valid {
     // test!(P43, ibm43v01); // Character reference
     test!(P44, ibm44v01, "ATTLIST not implemented");
     test!(P45, ibm45v01, "ATTLIST not implemented");
-    // test!(P47, ibm47v01); // element content group parsing
+    test!(P47, ibm47v01);
     test!(P49, ibm49v01);
     test!(P50, ibm50v01);
     test!(P51, ibm51v01);

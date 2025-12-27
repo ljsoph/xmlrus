@@ -52,6 +52,13 @@ pub enum ParseError {
     /// Missing `version` or unclosed declaration
     InvalidDeclaration(String, Span),
 
+    /// Invalid Element Content Separator
+    ///
+    /// Groupings must use the same pattern separator - Choice ['|'] or Sequence [',']
+    ///
+    /// expected, actual, span
+    InvalidElementContentSeparator(char, char, Span),
+
     /// Invalid Element Type declaration
     ///
     /// Well formed Element Type declarations must contain a valid name and [`Content Spec`]
@@ -235,6 +242,15 @@ impl std::fmt::Display for ParseError {
                     span.row, span.col_start, expected
                 )?;
                 writeln!(f, "{span}")
+            }
+            ParseError::InvalidElementContentSeparator(expected, actual, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: invalid element content separator",
+                    span.row, span.col_start
+                )?;
+                writeln!(f, "  Expected: '{expected}'\n  Actual:   '{actual}'")?;
+                write!(f, "{span}")
             }
             ParseError::InvalidElementTypeDecl(span) => {
                 writeln!(
@@ -2235,31 +2251,35 @@ fn parse_element_content_children<'a>(
             }
             b')' => break,
             b',' => {
-                stream.advance(1);
-                stream.consume_whitespace();
                 match content_type {
                     None => content_type = Some(Type::Seq),
-                    Some(Type::Choice) => panic!("TODO: Invalid element content sep"),
-                    Some(Type::Seq) => {
-                        let name = parse_name(stream)?;
-                        let repetition = parse_repetition(stream)?;
-                        content.push(ContentParticle::Name { name, repetition });
+                    Some(Type::Choice) => {
+                        return Err(ParseError::InvalidElementContentSeparator(
+                            ',',
+                            '|',
+                            stream.span_single(),
+                        ));
                     }
+                    Some(Type::Seq) => {}
                 }
-            }
 
-            b'|' => {
                 stream.advance(1);
                 stream.consume_whitespace();
+            }
+            b'|' => {
                 match content_type {
                     None => content_type = Some(Type::Choice),
-                    Some(Type::Seq) => panic!("TODO: Invalid element content sep"),
-                    Some(Type::Choice) => {
-                        let name = parse_name(stream)?;
-                        let repetition = parse_repetition(stream)?;
-                        content.push(ContentParticle::Name { name, repetition });
+                    Some(Type::Seq) => {
+                        return Err(ParseError::InvalidElementContentSeparator(
+                            '|',
+                            ',',
+                            stream.span_single(),
+                        ));
                     }
+                    Some(Type::Choice) => {}
                 }
+                stream.advance(1);
+                stream.consume_whitespace();
             }
             b'(' => {
                 stream.advance(1);
