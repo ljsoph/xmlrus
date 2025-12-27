@@ -2169,7 +2169,7 @@ fn parse_comment<'a>(
 ) -> ParseResult<Node<'a>> {
     let start = stream.pos;
 
-    stream.advance(5);
+    stream.advance(4);
     loop {
         if stream.is_at_end() {
             return Err(ParseError::UnexpectedEndOfStream);
@@ -2769,5 +2769,22 @@ mod test {
         );
         let res = parse_notation_decl(&mut stream, &mut ctx);
         assert!(res.is_err())
+    }
+
+    #[test]
+    fn test_parse_comment_empty() {
+        let mut stream = stream_from("<!---->");
+        let mut ctx = context();
+        let res = parse_comment(&mut stream, &mut ctx, None);
+        assert!(res.is_ok())
+    }
+
+    #[test]
+    fn test_comment_invalid_double_hyphen() {
+        let mut stream = stream_from("<!----->");
+        let mut ctx = context();
+        let res = parse_comment(&mut stream, &mut ctx, None);
+        assert!(res.is_err());
+        assert!(matches!(res, Err(ParseError::InvalidComment(_, _))));
     }
 }

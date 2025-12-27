@@ -53,7 +53,7 @@ mod ibm_valid {
     test!(P14, ibm14v01, "ATTLIST not implemented");
     test!(P14, ibm14v02, "ATTLIST not implemented");
     test!(P14, ibm14v03, "ATTLIST not implemented");
-    // test!(P15, ibm15v01); // comment parsing
+    test!(P15, ibm15v01);
     test!(P15, ibm15v02);
     test!(P15, ibm15v03);
     test!(P15, ibm15v04);
