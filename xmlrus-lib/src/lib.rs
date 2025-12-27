@@ -1433,7 +1433,7 @@ fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
     } else if stream.starts_with("(") {
         stream.advance(1);
     } else {
-        return Err(ParseError::WTF(stream.span_single()));
+        unimplemented!();
     }
 
     stream.expect_and_consume_whitespace("AttType")?;
@@ -1659,45 +1659,42 @@ fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'
 fn parse_mixed_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, name: &'a str) -> ParseResult<()> {
     let mut names = vec![];
 
-    let start = stream.pos;
     stream.advance(7);
-    names.push(stream.slice(start, stream.pos));
-
     stream.consume_whitespace();
 
-    loop {
-        match stream.current_byte()? {
-            b'|' => {
-                stream.advance(1);
-                stream.consume_whitespace();
-
-                let name_start = stream.pos;
-                let name = parse_name(stream)?;
-
-                // The same name MUST NOT appear more than once in a single mixed-content declaration.
-                if names.contains(&name) {
-                    return Err(ParseError::DuplicateMixedContent(
-                        name.to_string(),
-                        stream.span_from(name_start),
-                    ));
-                }
-
-                names.push(name);
-                stream.consume_whitespace();
-            }
-            b')' => break,
-            _ => unreachable!(
-                "this should never happen but you should never say never so it should probably be handled but that is a future me problem"
-            ),
-        }
-    }
-
-    stream.expect_byte(b')')?;
-    stream.consume_whitespace();
-
-    if let Ok(b'*') = stream.current_byte() {
-        // TODO: something with the '*'
+    if stream.current_byte()? == b')' {
         stream.advance(1);
+        if let Ok(b'*') = stream.current_byte() {
+            // TODO: something with the '*'
+            stream.advance(1);
+        }
+    } else {
+        loop {
+            stream.consume_whitespace();
+            stream.expect_byte(b'|')?;
+            stream.consume_whitespace();
+
+            let name_start = stream.pos;
+            let name = parse_name(stream)?;
+
+            // The same name MUST NOT appear more than once in a single mixed-content declaration.
+            if names.contains(&name) {
+                return Err(ParseError::DuplicateMixedContent(
+                    name.to_string(),
+                    stream.span_from(name_start),
+                ));
+            }
+
+            names.push(name);
+            stream.consume_whitespace();
+
+            if stream.current_byte()? == b')' {
+                break;
+            }
+        }
+
+        stream.advance(1);
+        stream.expect_byte(b'*')?;
     }
 
     ctx.element_types.push(ElementTypeDecl {
