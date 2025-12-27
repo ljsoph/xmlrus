@@ -90,6 +90,9 @@ pub enum ParseError {
     /// Invalid UTF-8
     InvalidUtf8,
 
+    /// Invalid Version
+    InvalidVersion(Span),
+
     /// Invalid XML character
     InvalidXmlChar(char, Span),
 
@@ -295,6 +298,10 @@ impl std::fmt::Display for ParseError {
             }
             ParseError::InvalidUtf8 => {
                 writeln!(f, "source did not contain valid UTF-8")
+            }
+            ParseError::InvalidVersion(span) => {
+                writeln!(f, "invalid document version")?;
+                writeln!(f, "{span}")
             }
             ParseError::InvalidXmlName(span) => {
                 writeln!(f, "error:{}:{}: invalid tag", span.row, span.col_start)?;
@@ -1087,7 +1094,7 @@ fn parse_nc_name<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
 fn parse_prolog<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     // There can only be one XML declaration, and it must be at the absolute start
     // of the Document, i.e., no characters are allowed before it (including whitespace)
-    if stream.starts_with("<?xml ") {
+    if stream.starts_with("<?xml") {
         parse_xml_decl(stream, ctx)?;
     }
 
@@ -1130,7 +1137,7 @@ fn parse_misc<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseR
 // SDDecl        ::=   S 'standalone' Eq (("'" ('yes' | 'no') "'") | ('"' ('yes' | 'no') '"')) [VC: Standalone Document Declaration]
 fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.advance(5);
-    stream.consume_whitespace();
+    stream.expect_and_consume_whitespace("<?xml")?;
 
     if !stream.peek_seq("version") {
         return Err(ParseError::InvalidDeclaration(
@@ -1144,7 +1151,25 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
     stream.expect_byte(b'=')?;
     stream.consume_whitespace();
 
-    let version = parse_attribute_value(stream, ctx)?;
+    let version = {
+        let delimiter = stream.consume_quote()?;
+        if !stream.starts_with("1.") {
+            return Err(ParseError::InvalidVersion(stream.span_single()));
+        }
+
+        let start = stream.pos;
+        stream.advance(2);
+        loop {
+            match stream.current_byte()? {
+                c if c == delimiter => break,
+                c if c.is_ascii_digit() => stream.advance(1),
+                _ => return Err(ParseError::InvalidVersion(stream.span_single())),
+            }
+        }
+        let version = stream.slice_from(start);
+        stream.consume_quote()?;
+        version
+    };
 
     stream.consume_whitespace();
     let encoding = if stream.starts_with("encoding") {
