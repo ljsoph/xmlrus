@@ -1517,9 +1517,11 @@ fn parse_mixed_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, 
     }
 
     stream.expect_byte(b')')?;
+    stream.consume_whitespace();
 
-    if names.len() > 1 {
-        stream.expect_byte(b'*')?;
+    if let Ok(b'*') = stream.current_byte() {
+        // TODO: something with the '*'
+        stream.advance(1);
     }
 
     ctx.element_types.push(ElementTypeDecl {

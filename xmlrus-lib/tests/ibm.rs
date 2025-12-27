@@ -113,12 +113,12 @@ mod ibm_valid {
     // test!(P43, ibm43v01); // Character reference
     test!(P44, ibm44v01, "ATTLIST not implemented");
     test!(P45, ibm45v01, "ATTLIST not implemented");
-    // test!(P47, ibm47v01);  // * after mixed content ELEMENT
+    // test!(P47, ibm47v01); // element content group parsing
     test!(P49, ibm49v01);
     // test!(P50, ibm50v01); // End tag with space before closing >
-    // test!(P51, ibm51v01); // * after mixed content ELEMENT
+    test!(P51, ibm51v01);
     test!(P51, ibm51v02);
-    // test!(P52, ibm52v01); // * after mixed content ELEMENT
+    test!(P52, ibm52v01, "ATTLIST not imeplemnted");
     test!(P54, ibm54v01, "ATTLIST not implemented");
     test!(P54, ibm54v02, "ATTLIST not implemented");
     test!(P54, ibm54v03, "ATTLIST not implemented");
