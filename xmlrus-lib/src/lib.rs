@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::Path;
 use std::str::FromStr;
 
 type ParseResult<T> = std::result::Result<T, ParseError>;
@@ -78,6 +79,9 @@ pub enum ParseError {
     ///
     /// Valid values [yes | no]
     InvalidStandalone(String, Span),
+
+    /// Invalid UTF-8
+    InvalidUtf8,
 
     /// Invalid XML character
     InvalidXmlChar(char, Span),
@@ -272,6 +276,9 @@ impl std::fmt::Display for ParseError {
                 writeln!(f, "error{}:{}: invalid standalone value", span.row, span.col_start)?;
                 writeln!(f, "  Expected: [yes | no]\n  Actual:   [{actual}]")?;
                 writeln!(f, "\n{span}")
+            }
+            ParseError::InvalidUtf8 => {
+                writeln!(f, "source did not contain valid UTF-8")
             }
             ParseError::InvalidXmlName(span) => {
                 writeln!(f, "error:{}:{}: invalid tag", span.row, span.col_start)?;
@@ -911,7 +918,23 @@ enum Optionality {
 pub struct Parser;
 
 impl Parser {
-    pub fn parse(source: &str) -> ParseResult<Document<'_>> {
+    pub fn parse<P>(source: P) -> ParseResult<()>
+    where
+        P: AsRef<Path>,
+    {
+        let source = match std::fs::read_to_string(source) {
+            Ok(source) => source,
+            Err(_) => return Err(ParseError::InvalidUtf8),
+        };
+
+        let _doc = Self::parse_from_str(&source)?;
+
+        dbg!(_doc);
+
+        Ok(())
+    }
+
+    pub fn parse_from_str(source: &str) -> ParseResult<Document<'_>> {
         let doc = Document {
             name: None,
             root_node_id: None,
@@ -934,8 +957,6 @@ impl Parser {
         };
 
         parse_document(&mut stream, &mut ctx)?;
-
-        // dbg!(ctx.element_types);
 
         Ok(ctx.doc)
     }
@@ -1185,14 +1206,10 @@ fn parse_processing_instruction<'a>(
             return Err(ParseError::UnexpectedEndOfStream);
         }
 
-        if let Ok(b'?') = stream.current_byte() {
-            let peek = stream.peek_byte()?;
-            match peek {
-                b'>' => {
-                    break;
-                }
-                c => return Err(ParseError::UnexpectedCharacter('>', c as char, stream.span_single())),
-            }
+        if let Ok(b'?') = stream.current_byte()
+            && let Ok(b'>') = stream.peek_byte()
+        {
+            break;
         }
 
         stream.advance(1);
@@ -2439,7 +2456,7 @@ mod test {
         let mut stream = stream_from(r#"<?target data?<a/>"#);
         let mut ctx = context();
         let res = parse_processing_instruction(&mut stream, &mut ctx, None);
-        assert!(matches!(res, Err(ParseError::UnexpectedCharacter(_, _, _))));
+        assert!(matches!(res, Err(ParseError::UnexpectedEndOfStream)));
     }
 
     #[test]
@@ -2453,7 +2470,7 @@ mod test {
     // ========== Namespace/QName ==========
     #[test]
     fn test_parse_stag_with_prefix() {
-        let res = Parser::parse(r#"<root xmlns:hello="bob"><hello:world/></root>"#);
+        let res = Parser::parse_from_str(r#"<root xmlns:hello="bob"><hello:world/></root>"#);
         assert!(res.is_ok(),);
     }
 
@@ -2528,31 +2545,31 @@ mod test {
 
     #[test]
     fn test_parse_element() {
-        let res = Parser::parse(r#"<root xmlns:ns="ns"><ns:name>hello</ns:name></root>"#);
+        let res = Parser::parse_from_str(r#"<root xmlns:ns="ns"><ns:name>hello</ns:name></root>"#);
         assert!(res.is_ok())
     }
 
     #[test]
     fn test_parse_empty_element() {
-        let res = Parser::parse(r#"<name/>"#);
+        let res = Parser::parse_from_str(r#"<name/>"#);
         assert!(res.is_ok());
     }
 
     #[test]
     fn test_parse_element_prefix_mismatch() {
-        let res = Parser::parse(r#"<root xmlns:a="a" xmlns:b="b"><a:name></b:name></root>"#);
+        let res = Parser::parse_from_str(r#"<root xmlns:a="a" xmlns:b="b"><a:name></b:name></root>"#);
         assert!(matches!(res, Err(ParseError::TagNameMismatch(_, _, _))));
     }
 
     #[test]
     fn test_parse_element_name_mismatch() {
-        let res = Parser::parse(r#"<name></notaname>"#);
+        let res = Parser::parse_from_str(r#"<name></notaname>"#);
         assert!(matches!(res, Err(ParseError::TagNameMismatch(_, _, _))));
     }
 
     #[test]
     fn test_parse_element_invalid_tag_name() {
-        let res = Parser::parse(r#"< name/>"#);
+        let res = Parser::parse_from_str(r#"< name/>"#);
         assert!(matches!(res, Err(ParseError::InvalidXmlName(_))));
     }
 
@@ -2598,7 +2615,7 @@ mod test {
 
     #[test]
     fn test_parse_element_duplicate_attribute() {
-        let res = Parser::parse(r#"<name some="value" some="value"/>"#);
+        let res = Parser::parse_from_str(r#"<name some="value" some="value"/>"#);
         assert!(matches!(res, Err(ParseError::DuplicateAttribute(_, _))));
     }
 
