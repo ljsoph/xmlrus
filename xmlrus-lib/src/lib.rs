@@ -55,7 +55,7 @@ pub enum ParseError {
     /// Invalid Declaration
     ///
     /// Missing `version` or unclosed declaration
-    InvalidDeclaration(String, Span),
+    InvalidDeclaration(&'static str, Span),
 
     /// Invalid Element Content Separator
     ///
@@ -254,7 +254,7 @@ impl std::fmt::Display for ParseError {
             ParseError::InvalidDeclaration(expected, span) => {
                 writeln!(
                     f,
-                    "error:{}:{}: invalid declaration: expected [{}]",
+                    "error:{}:{}: invalid declaration: expected {}",
                     span.row, span.col_start, expected
                 )?;
                 writeln!(f, "{span}")
@@ -825,6 +825,14 @@ impl<'a> TokenStream<'a> {
         Some(self.source.as_bytes()[self.pos + 1])
     }
 
+    fn peek_prev(&mut self) -> Option<u8> {
+        if self.pos - 1 < 0 {
+            return None;
+        }
+
+        Some(self.source.as_bytes()[self.pos - 1])
+    }
+
     fn peek_byte_at(&mut self, pos: usize) -> Option<u8> {
         if self.pos + pos >= self.len {
             return None;
@@ -1147,14 +1155,14 @@ fn parse_misc<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseR
 // VersionNum    ::=   '1.' [0-9]+
 // EncodingDecl  ::=   S 'encoding' Eq ('"' EncName '"' | "'" EncName "'" )
 // EncName       ::=   [A-Za-z] ([A-Za-z0-9._] | '-')* /* Encoding name contains only Latin characters */
-// SDDecl        ::=   S 'standalone' Eq (("'" ('yes' | 'no') "'") | ('"' ('yes' | 'no') '"')) [VC: Standalone Document Declaration]
+// SDDecl        ::=   S 'standalone' Eq (("'" ('yes' | 'no') "'") | ('"' ('yes' | 'no') '"'))
 fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.advance(5);
     stream.expect_and_consume_whitespace("<?xml")?;
 
     if !stream.peek_seq("version") {
         return Err(ParseError::InvalidDeclaration(
-            String::from("version attribute"),
+            "version attribute",
             stream.span(stream.pos, stream.pos + 1),
         ));
     }
@@ -1186,6 +1194,13 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
 
     stream.consume_whitespace();
     let encoding = if stream.starts_with("encoding") {
+        let prev = stream.peek_prev();
+        if !matches!(prev, Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            return Err(ParseError::InvalidDeclaration(
+                "space before encoding",
+                stream.span_single(),
+            ));
+        }
         stream.advance(8);
         stream.expect_byte(b'=')?;
         Some(parse_attribute_value(stream, ctx)?)
@@ -1195,6 +1210,14 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
 
     stream.consume_whitespace();
     let standalone = if stream.peek_seq("standalone") {
+        let prev = stream.peek_prev();
+        if !matches!(prev, Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            return Err(ParseError::InvalidDeclaration(
+                "space before standalone",
+                stream.span_single(),
+            ));
+        }
+
         let start = stream.pos;
         stream.advance(10);
         stream.expect_byte(b'=')?;
@@ -1215,7 +1238,7 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
     stream.consume_whitespace();
     if !stream.peek_seq("?>") {
         return Err(ParseError::InvalidDeclaration(
-            String::from("?>"),
+            "?>",
             stream.span(stream.pos, stream.pos + 1),
         ));
     }
