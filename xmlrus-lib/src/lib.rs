@@ -797,12 +797,20 @@ impl<'a> TokenStream<'a> {
         self.source.as_bytes()[self.pos]
     }
 
-    fn peek_byte(&mut self) -> ParseResult<u8> {
+    fn peek_byte(&mut self) -> Option<u8> {
         if self.pos + 1 >= self.len {
-            return Err(ParseError::UnexpectedEndOfStream);
+            return None;
         }
 
-        Ok(self.source.as_bytes()[self.pos + 1])
+        Some(self.source.as_bytes()[self.pos + 1])
+    }
+
+    fn peek_byte_at(&mut self, pos: usize) -> Option<u8> {
+        if self.pos + pos >= self.len {
+            return None;
+        }
+
+        Some(self.source.as_bytes()[self.pos + pos])
     }
 
     fn peek_seq(&mut self, seq: &str) -> bool {
@@ -1197,25 +1205,29 @@ fn parse_processing_instruction<'a>(
     ctx: &mut Context<'a>,
     parent: Option<usize>,
 ) -> ParseResult<Node<'a>> {
-    if stream.starts_with("<?xml ") {
+    stream.advance(2);
+    if let Some(b'x' | b'X') = stream.peek_byte_at(0)
+        && let Some(b'm' | b'M') = stream.peek_byte_at(1)
+        && let Some(b'l' | b'L') = stream.peek_byte_at(2)
+        && let Some(b' ' | b'\t' | b'\r' | b'\n') = stream.peek_byte_at(3)
+    {
         return Err(ParseError::UnexpectedDeclaration(
             stream.span(stream.pos, stream.pos + 1),
         ));
     }
 
-    stream.advance(2);
     let target = parse_name(stream)?;
 
     if let Ok(b'?') = stream.current_byte() {
-        let peek = stream.peek_byte()?;
-        match peek {
-            b'>' => {
+        match stream.peek_byte() {
+            Some(b'>') => {
                 stream.advance(2);
                 let id = ctx.current_id();
                 let pi = Node::new(id, parent, NodeKind::ProcessingInstruction { target, data: None });
                 return Ok(pi);
             }
-            c => return Err(ParseError::UnexpectedCharacter('>', c as char, stream.span_single())),
+            Some(c) => return Err(ParseError::UnexpectedCharacter('>', c as char, stream.span_single())),
+            None => return Err(ParseError::UnexpectedEndOfStream),
         }
     }
 
@@ -1227,7 +1239,7 @@ fn parse_processing_instruction<'a>(
         }
 
         if let Ok(b'?') = stream.current_byte()
-            && let Ok(b'>') = stream.peek_byte()
+            && let Some(b'>') = stream.peek_byte()
         {
             break;
         }
@@ -2013,7 +2025,7 @@ fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>
                 normalized.push(b' ');
                 stream.advance(1);
             }
-            Ok('&') if stream.peek_byte() == Ok(b'#') => {
+            Ok('&') if stream.peek_byte() == Some(b'#') => {
                 owned = true;
                 let c = parse_character_reference(stream)?;
                 normalize_char(c, &mut normalized);
