@@ -403,7 +403,7 @@ impl std::fmt::Display for ParseError {
             }
             ParseError::UnexpectedEndOfStream => write!(f, "error: unexpected end of stream"),
             ParseError::WTF(span) => {
-                write!(
+                writeln!(
                     f,
                     "error:{}:{}: something unexpected happened",
                     span.row, span.col_start
@@ -885,14 +885,18 @@ impl<'a> TokenStream<'a> {
         self.pos - start
     }
 
-    fn consume_quote(&mut self) -> ParseResult<char> {
-        let current = self.current_char()?;
-        if current == '\'' || current == '"' {
-            self.advance(current.len_utf8());
+    fn consume_quote(&mut self) -> ParseResult<u8> {
+        let current = self.current_byte()?;
+        if current == b'\'' || current == b'"' {
+            self.advance(1);
             return Ok(current);
         }
 
-        Err(ParseError::UnexpectedCharacter2("a quote", current, self.span_single()))
+        Err(ParseError::UnexpectedCharacter2(
+            "a quote",
+            current as char,
+            self.span_single(),
+        ))
     }
 }
 
@@ -1257,7 +1261,6 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     stream.expect_and_consume_whitespace("<!DOCTYPE")?;
 
     let name = parse_name(stream)?;
-    dbg!(&name);
     ctx.doc.name = Some(name);
     stream.consume_whitespace();
 
@@ -1483,12 +1486,12 @@ fn parse_system_literal<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str
     let start = stream.pos;
 
     loop {
-        let current = stream.current_char()?;
+        let current = stream.current_byte()?;
         if current == delimiter {
             break;
         }
 
-        stream.advance(current.len_utf8());
+        stream.advance(1);
     }
 
     // TODO: dereference to obtain input (this one is going low on the priority list lol)
@@ -1504,19 +1507,19 @@ fn parse_public_id_literal<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a 
     let start = stream.pos;
 
     loop {
-        let current = stream.current_char()?;
+        let current = stream.current_byte()?;
         if current == delimiter {
             break;
         }
 
-        if !matches!(current, 'a'..='z' | 'A'..='Z' | '0'..='9' | ' ' | '\n' | '\r' | '-' | '\'' | '(' | ')'
-                        | '+' | ',' | '.' | '/' | ':' | '=' | '?' | ';' | '!' | '*' | '#' | '@' | '$' | '_' | '%')
+        if !matches!(current, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b' ' | b'\n' | b'\r' | b'-' | b'\'' | b'(' | b')'
+                        | b'+' | b',' | b'.' | b'/' | b':' | b'=' | b'?' | b';' | b'!' | b'*' | b'#' | b'@' | b'$' | b'_' | b'%')
         {
             // TODO actual error
             return Err(ParseError::WTF(stream.span_single()));
         }
 
-        stream.advance(current.len_utf8());
+        stream.advance(1);
     }
 
     let pubid_literal = stream.slice_from(start);
@@ -1527,7 +1530,6 @@ fn parse_public_id_literal<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a 
 // elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
 // contentspec  ::=  'EMPTY' | 'ANY' | Mixed | children
 fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
-    dbg!("elementtypedecl");
     stream.advance(9);
 
     stream.expect_and_consume_whitespace("<!ELEMENT")?;
@@ -1727,14 +1729,36 @@ fn parse_ndata_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 fn parse_entity_value<'a>(stream: &mut TokenStream<'a>, _name: &'a str) -> ParseResult<&'a str> {
     let delimiter = stream.consume_quote()?;
     let start = stream.pos;
+    dbg!(stream.unchecked_current_byte() as char);
 
     // TODO: Parse references and recursion detection
     //  - A parsed entity MUST NOT contain a recursive reference to it either directly or indirectly.
     loop {
-        let current = stream.current_char()?;
-        match current {
-            d if d == delimiter => break,
-            _ => stream.advance(current.len_utf8()),
+        let current_byte = stream.current_byte()?;
+        if current_byte >= 0x80 {
+            let current_char = stream.current_char()?;
+            stream.advance(current_char.len_utf8());
+        } else {
+            match current_byte {
+                c if c == delimiter => break,
+                // PEReference  ::= '%' Name ';'
+                b'%' => {
+                    stream.advance(1);
+                    let _name = parse_name(stream)?;
+                    stream.expect_byte(b';')?;
+                }
+                // EntityRef or CharRef
+                b'&' => {
+                    if stream.starts_with("&#") {
+                        parse_character_reference(stream)?;
+                    } else {
+                        stream.advance(1);
+                        let _name = parse_name(stream)?;
+                        stream.expect_byte(b';')?;
+                    }
+                }
+                _ => stream.advance(1),
+            }
         }
     }
 
@@ -1983,7 +2007,7 @@ fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>
     loop {
         let current = stream.current_char();
         match current {
-            Ok(d) if d == delimiter => break,
+            Ok(d) if d == delimiter as char => break,
             Ok('\r' | '\n' | '\t') => {
                 owned = true;
                 normalized.push(b' ');
