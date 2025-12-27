@@ -1257,6 +1257,7 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     stream.expect_and_consume_whitespace("<!DOCTYPE")?;
 
     let name = parse_name(stream)?;
+    dbg!(&name);
     ctx.doc.name = Some(name);
     stream.consume_whitespace();
 
@@ -1268,15 +1269,11 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
 
         // Parse 'intSubset'
         loop {
-            // TODO:
-            // - elementdecl
-            // - AttlistDecl
-            // - NotationDecl
             match stream.current_byte()? {
                 b']' => break,
                 b'<' if stream.starts_with("<!ELEMENT") => parse_element_type_decl(stream, ctx)?,
                 b'<' if stream.starts_with("<!ENTITY") => parse_entity_decl(stream, ctx)?,
-                b'<' if stream.starts_with("<!ATTLIST") => unimplemented!("ATTLIST"),
+                b'<' if stream.starts_with("<!ATTLIST") => parse_attlist_decl(stream, ctx)?,
                 b'<' if stream.starts_with("<!NOTATION") => parse_notation_decl(stream, ctx)?,
                 b'<' if stream.starts_with("<?") => {
                     let pi = parse_processing_instruction(stream, ctx, None)?;
@@ -1287,7 +1284,13 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
                     ctx.push_node(comment);
                 }
                 _ if stream.is_white_space()? => stream.advance(1),
-                b => panic!("{}", b as char),
+                b => {
+                    return Err(ParseError::UnexpectedCharacter2(
+                        "'<' or ' '",
+                        b as char,
+                        stream.span_single(),
+                    ));
+                }
             }
         }
 
@@ -1296,6 +1299,87 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     }
 
     stream.expect_byte(b'>')?;
+
+    Ok(())
+}
+
+// AttlistDecl  ::=  '<!ATTLIST' S Name AttDef* S? '>'
+fn parse_attlist_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+    stream.advance(9);
+    stream.expect_and_consume_whitespace("<!ATTRLIST")?;
+
+    let _name = parse_name(stream)?;
+    stream.consume_whitespace();
+
+    loop {
+        match stream.current_byte()? {
+            b'>' => break,
+            _ => parse_att_def(stream, ctx)?,
+        }
+    }
+
+    Ok(())
+}
+
+// AttDef         ::=  S Name S AttType S DefaultDecl
+// AttType        ::=  StringType | TokenizedType | EnumeratedType
+// StringType     ::=  'CDATA'
+// TokenizedType  ::=  'ID'
+//                     | 'IDREF'
+//                     | 'IDREFS'
+//                     | 'ENTITY'
+//                     | 'ENTITIES'
+//                     | 'NMTOKEN'
+//                     | 'NMTOKENS'
+fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+    stream.consume_whitespace();
+    let _name = parse_name(stream)?;
+    stream.expect_and_consume_whitespace("AttDef name")?;
+
+    if stream.starts_with("CDATA") {
+        stream.advance(5);
+    } else if stream.starts_with("ID") {
+        stream.advance(2);
+    } else if stream.starts_with("IDREF") {
+        stream.advance(5);
+    } else if stream.starts_with("IDREFS") {
+        stream.advance(6);
+    } else if stream.starts_with("ENTITY") {
+        stream.advance(6);
+    } else if stream.starts_with("ENTITIES") {
+        stream.advance(8);
+    } else if stream.starts_with("NMTOKEN") {
+        stream.advance(7);
+    } else if stream.starts_with("NMTOKENS") {
+        stream.advance(8);
+    } else if stream.starts_with("NOTATION") {
+        stream.advance(8);
+    } else if stream.starts_with("(") {
+        stream.advance(1);
+    } else {
+        return Err(ParseError::WTF(stream.span_single()));
+    }
+
+    stream.expect_and_consume_whitespace("AttType")?;
+    parse_default_decl(stream, ctx)?;
+
+    Ok(())
+}
+
+// DefaultDecl  ::=  '#REQUIRED' | '#IMPLIED' | (('#FIXED' S)? AttValue)
+// [WFC: No < in Attribute Values]
+// [WFC: No External Entity References]
+fn parse_default_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+    if stream.starts_with("#REQUIRED") {
+        stream.advance(9);
+    } else if stream.starts_with("#IMPLIED") {
+        stream.advance(8);
+    } else if stream.starts_with("#FIXED") {
+        stream.advance(6);
+        stream.expect_and_consume_whitespace("FIXED Default Decl")?;
+    }
+
+    let _value = parse_attribute_value(stream, ctx)?;
 
     Ok(())
 }
@@ -1443,6 +1527,7 @@ fn parse_public_id_literal<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a 
 // elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
 // contentspec  ::=  'EMPTY' | 'ANY' | Mixed | children
 fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+    dbg!("elementtypedecl");
     stream.advance(9);
 
     stream.expect_and_consume_whitespace("<!ELEMENT")?;
