@@ -35,6 +35,11 @@ pub enum ParseError {
     /// A given Name MUST NOT be declared in more than one notation declaration.
     DuplicateNotation(String, Span),
 
+    /// Illegal Parameter Entity Reference
+    ///
+    /// Parameter Entity References must not occur within markup declarations
+    IllegalPEReference(Span),
+
     /// Invalid Character Data
     ///
     /// Unescaped ampersands (`&`) and left angle brackets (`<`) will be parsed as separate errors.
@@ -215,6 +220,14 @@ impl std::fmt::Display for ParseError {
                     f,
                     "error:{}:{}: duplicate notataion '{}'",
                     span.row, span.col_start, element
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::IllegalPEReference(span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: illegal parameter entity reference",
+                    span.row, span.col_start
                 )?;
                 writeln!(f, "{span}")
             }
@@ -1781,8 +1794,12 @@ fn parse_entity_value<'a>(stream: &mut TokenStream<'a>, _name: &'a str) -> Parse
                 // PEReference  ::= '%' Name ';'
                 b'%' => {
                     stream.advance(1);
-                    let _name = parse_name(stream)?;
+                    let name = parse_name(stream)?;
                     stream.expect_byte(b';')?;
+                    stream.advance(1);
+                    return Err(ParseError::IllegalPEReference(
+                        stream.span_from(stream.pos - name.len() - 2),
+                    ));
                 }
                 // EntityRef or CharRef
                 b'&' => {
