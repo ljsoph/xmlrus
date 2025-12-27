@@ -1945,6 +1945,8 @@ fn parse_element_end<'a>(
     }
 
     let (prefix, local) = parse_qname(stream, ctx)?;
+
+    stream.consume_whitespace();
     stream.expect_byte(b'>')?;
 
     Ok((prefix, local))
