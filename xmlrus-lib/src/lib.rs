@@ -1816,12 +1816,9 @@ fn parse_entity_value<'a>(stream: &mut TokenStream<'a>, _name: &'a str) -> Parse
                 c if c == delimiter => break,
                 // PEReference  ::= '%' Name ';'
                 b'%' => {
-                    stream.advance(1);
-                    let name = parse_name(stream)?;
-                    stream.expect_byte(b';')?;
-                    stream.advance(1);
+                    let pe_ref = parse_parameter_entity_ref(stream)?;
                     return Err(ParseError::IllegalPEReference(
-                        stream.span_from(stream.pos - name.len() - 2),
+                        stream.span_from(stream.pos - pe_ref.len() - 2),
                     ));
                 }
                 // EntityRef or CharRef
@@ -2423,6 +2420,7 @@ fn parse_element_content_children<'a>(
     // Leading '(' and any whitespace was already consumed
     let mut content = vec![parse_content_particle(stream, ctx)?];
     let mut content_type: Option<Type> = None;
+    let mut expecting_content = false;
 
     loop {
         stream.consume_whitespace();
@@ -2435,8 +2433,17 @@ fn parse_element_content_children<'a>(
                     repetition: Repetition::Once,
                 });
             }
-            b')' => break,
+            b')' => {
+                if expecting_content {
+                    return Err(ParseError::UnexpectedCharacter2("content", ')', stream.span_single()));
+                }
+                break;
+            }
             b',' => {
+                if expecting_content {
+                    return Err(ParseError::UnexpectedCharacter2("content", ',', stream.span_single()));
+                }
+
                 match content_type {
                     None => content_type = Some(Type::Seq),
                     Some(Type::Choice) => {
@@ -2451,8 +2458,13 @@ fn parse_element_content_children<'a>(
 
                 stream.advance(1);
                 stream.consume_whitespace();
+                expecting_content = true;
             }
             b'|' => {
+                if expecting_content {
+                    return Err(ParseError::UnexpectedCharacter2("content", '|', stream.span_single()));
+                }
+
                 match content_type {
                     None => content_type = Some(Type::Choice),
                     Some(Type::Seq) => {
@@ -2466,8 +2478,17 @@ fn parse_element_content_children<'a>(
                 }
                 stream.advance(1);
                 stream.consume_whitespace();
+                expecting_content = true;
             }
             b'(' => {
+                if !expecting_content {
+                    return Err(ParseError::UnexpectedCharacter2(
+                        "non-content/grouping",
+                        '(',
+                        stream.span_single(),
+                    ));
+                }
+
                 stream.advance(1);
                 stream.consume_whitespace();
                 let children = parse_element_content_children(stream, ctx)?;
@@ -2483,11 +2504,21 @@ fn parse_element_content_children<'a>(
                     },
                 };
                 content.push(children);
+                expecting_content = false;
             }
-            _ => {
+            c => {
+                if !expecting_content {
+                    return Err(ParseError::UnexpectedCharacter2(
+                        "non-content",
+                        c as char,
+                        stream.span_single(),
+                    ));
+                }
+
                 let name = parse_name(stream)?;
                 let repetition = parse_repetition(stream)?;
                 content.push(ContentParticle::Name { name, repetition });
+                expecting_content = false;
             }
         }
     }
