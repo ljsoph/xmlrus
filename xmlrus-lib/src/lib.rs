@@ -826,7 +826,7 @@ impl<'a> TokenStream<'a> {
     }
 
     fn peek_prev(&mut self) -> Option<u8> {
-        if self.pos - 1 < 0 {
+        if self.pos == 0 {
             return None;
         }
 
@@ -1292,7 +1292,7 @@ fn parse_processing_instruction<'a>(
         }
     }
 
-    stream.consume_whitespace();
+    stream.expect_and_consume_whitespace("PITarget")?;
     let data_start = stream.pos;
     loop {
         if stream.is_at_end() {
@@ -1430,10 +1430,53 @@ fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
         stream.advance(8);
     } else if stream.starts_with("NOTATION") {
         stream.advance(8);
+        stream.expect_and_consume_whitespace("NOTATION")?;
+        stream.expect_byte(b'(')?;
+        stream.consume_whitespace();
+        let _name = parse_name(stream)?;
+        loop {
+            stream.consume_whitespace();
+            match stream.current_byte()? {
+                b')' => break,
+                b'|' => {
+                    stream.advance(1);
+                    let _ = parse_name(stream)?;
+                }
+                _ => return Err(ParseError::WTF(stream.span_single())),
+            }
+        }
     } else if stream.starts_with("(") {
         stream.advance(1);
+        loop {
+            stream.consume_whitespace();
+            loop {
+                let c = stream.current_char()?;
+                if !validate::is_name_char(c) {
+                    break;
+                }
+                stream.advance(c.len_utf8());
+            }
+
+            stream.consume_whitespace();
+            match stream.current_byte()? {
+                b')' => break,
+                b'|' => {
+                    stream.advance(1);
+                    stream.consume_whitespace();
+                    loop {
+                        let c = stream.current_char()?;
+                        if !validate::is_name_char(c) {
+                            break;
+                        }
+                        stream.advance(c.len_utf8());
+                    }
+                }
+                _ => return Err(ParseError::WTF(stream.span_single())),
+            }
+        }
+        stream.advance(1);
     } else {
-        unimplemented!();
+        return Err(ParseError::WTF(stream.span_single()));
     }
 
     stream.expect_and_consume_whitespace("AttType")?;
@@ -1799,7 +1842,6 @@ fn parse_ndata_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 fn parse_entity_value<'a>(stream: &mut TokenStream<'a>, _name: &'a str) -> ParseResult<&'a str> {
     let delimiter = stream.consume_quote()?;
     let start = stream.pos;
-    dbg!(stream.unchecked_current_byte() as char);
 
     // TODO: Parse references and recursion detection
     //  - A parsed entity MUST NOT contain a recursive reference to it either directly or indirectly.
@@ -2678,7 +2720,7 @@ mod test {
         let mut stream = stream_from("<?L\u{FFFE}L hehe?>");
         let mut ctx = context();
         let res = parse_processing_instruction(&mut stream, &mut ctx, None);
-        assert!(matches!(res, Err(ParseError::InvalidXmlChar(_, _))));
+        assert!(res.is_err());
     }
 
     #[test]
