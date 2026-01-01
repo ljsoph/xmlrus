@@ -81,6 +81,9 @@ pub enum ParseError {
     /// Invalid Namespace character
     InvalidNamespaceChar(char, Span),
 
+    /// Invalid Nmtoken
+    InvalidNmtoken(Span),
+
     /// Invalid Notation Decl
     InvalidNotationDecl(&'static str, Span),
 
@@ -302,6 +305,10 @@ impl std::fmt::Display for ParseError {
                     "error:{}:{}: invalid namespace character encountered {:?}",
                     span.row, span.col_start, c
                 )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::InvalidNmtoken(span) => {
+                writeln!(f, "error:{}:{}: expected Nmtoken", span.row, span.col_start)?;
                 writeln!(f, "{span}")
             }
             ParseError::InvalidNotationDecl(reason, span) => {
@@ -1118,7 +1125,7 @@ fn parse_name<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
         stream.advance(c.len_utf8());
     }
 
-    let name = stream.slice(start, stream.pos);
+    let name = stream.slice_from(start);
     validate::is_valid_name(name, start, stream)?;
 
     Ok(name)
@@ -1141,10 +1148,29 @@ fn parse_nc_name<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
         stream.advance(c.len_utf8());
     }
 
-    let name = stream.slice(start, stream.pos);
+    let name = stream.slice_from(start);
     validate::is_valid_name(name, start, stream)?;
 
     Ok(name)
+}
+
+fn parse_nm_token<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
+    let start = stream.pos;
+
+    loop {
+        let current = stream.current_char()?;
+        if !validate::is_name_char(current) {
+            break;
+        }
+        stream.advance(current.len_utf8());
+    }
+
+    let nm_token = stream.slice_from(start);
+    if nm_token.is_empty() {
+        return Err(ParseError::InvalidNmtoken(stream.span_single()));
+    }
+
+    Ok(nm_token)
 }
 
 // prolog  ::=  XMLDecl? Misc* (doctypedecl Misc*)?
@@ -1488,29 +1514,17 @@ fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
         }
     } else if stream.starts_with("(") {
         stream.advance(1);
-        loop {
-            stream.consume_whitespace();
-            loop {
-                let c = stream.current_char()?;
-                if !validate::is_name_char(c) {
-                    break;
-                }
-                stream.advance(c.len_utf8());
-            }
+        stream.consume_whitespace();
+        let _nm_token = parse_nm_token(stream)?;
 
+        loop {
             stream.consume_whitespace();
             match stream.current_byte()? {
                 b')' => break,
                 b'|' => {
                     stream.advance(1);
                     stream.consume_whitespace();
-                    loop {
-                        let c = stream.current_char()?;
-                        if !validate::is_name_char(c) {
-                            break;
-                        }
-                        stream.advance(c.len_utf8());
-                    }
+                    let _nm_tokn = parse_nm_token(stream)?;
                 }
                 _ => return Err(ParseError::WTF(stream.span_single())),
             }
