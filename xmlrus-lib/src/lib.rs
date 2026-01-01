@@ -485,7 +485,7 @@ impl Span {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Document<'a> {
     pub name: Option<&'a str>,
     pub root_node_id: Option<usize>,
@@ -522,7 +522,7 @@ pub struct Notation<'a> {
     public_id: Option<&'a str>,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Attribute<'a> {
     pub name: &'a str,
     pub value: &'a str,
@@ -552,7 +552,7 @@ impl std::fmt::Debug for Namespace<'_> {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Node<'a> {
     pub id: usize,
     parent: Option<usize>,
@@ -571,7 +571,7 @@ impl std::fmt::Debug for Node<'_> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum NodeKind<'a> {
     Declaration {
         version: &'a str,
@@ -983,9 +983,9 @@ impl Parser {
             Err(_) => return Err(ParseError::InvalidUtf8),
         };
 
-        let _doc = Self::parse_from_str(&source)?;
+        let doc = Self::parse_from_str(&source)?;
 
-        dbg!(_doc);
+        dbg!(doc);
 
         Ok(())
     }
@@ -1382,7 +1382,7 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
 // AttlistDecl  ::=  '<!ATTLIST' S Name AttDef* S? '>'
 fn parse_attlist_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.advance(9);
-    stream.expect_and_consume_whitespace("<!ATTRLIST")?;
+    stream.expect_and_consume_whitespace("<!ATTLIST")?;
 
     let _name = parse_name(stream)?;
     stream.consume_whitespace();
@@ -1486,19 +1486,19 @@ fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
 }
 
 // DefaultDecl  ::=  '#REQUIRED' | '#IMPLIED' | (('#FIXED' S)? AttValue)
-// [WFC: No < in Attribute Values]
 // [WFC: No External Entity References]
 fn parse_default_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     if stream.starts_with("#REQUIRED") {
         stream.advance(9);
     } else if stream.starts_with("#IMPLIED") {
         stream.advance(8);
-    } else if stream.starts_with("#FIXED") {
-        stream.advance(6);
-        stream.expect_and_consume_whitespace("FIXED Default Decl")?;
+    } else {
+        if stream.starts_with("#FIXED") {
+            stream.advance(6);
+            stream.expect_and_consume_whitespace("FIXED Default Decl")?;
+        }
+        let _value = parse_attribute_value(stream, ctx)?;
     }
-
-    let _value = parse_attribute_value(stream, ctx)?;
 
     Ok(())
 }
