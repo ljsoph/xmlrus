@@ -41,6 +41,11 @@ pub enum ParseError {
     /// [Reference](https://www.w3.org/TR/xml/#NoExternalRefs)
     ExternalEntityRefInAttribute(Span),
 
+    /// Illegal Unparsed Entity
+    ///
+    /// Unparsed entities may be referred to only in attribute values declared to be of type ENTITY or ENTITIES
+    IllegalUnparsedEntity(String, Span),
+
     /// Illegal Parameter Entity Reference
     ///
     /// Parameter Entity References must not occur within markup declarations
@@ -235,6 +240,14 @@ impl std::fmt::Display for ParseError {
                     f,
                     "error:{}:{}: attribute references external entity",
                     span.row, span.col_start
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::IllegalUnparsedEntity(name, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: unparsed entity '{}' outside of attribute value",
+                    span.row, span.col_start, name
                 )?;
                 writeln!(f, "{span}")
             }
@@ -544,28 +557,43 @@ pub struct Notation<'a> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Entity<'a> {
     name: &'a str,
-    type_: EntityType<'a>,
+    entity_type: EntityType<'a>,
 }
 
 impl<'a> Entity<'a> {
-    fn new(name: &'a str, type_: EntityType<'a>) -> Self {
-        Self { name, type_ }
+    fn new(name: &'a str, entity_type: EntityType<'a>) -> Self {
+        Self { name, entity_type }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EntityType<'a> {
-    Internal(&'a str),
-    External(ExternalId<'a>),
+    InternalGeneral {
+        value: &'a str,
+    },
+    InternalParameter {
+        value: &'a str,
+    },
+    // TODO
+    InternalPredefined {
+        value: char,
+    },
+    ExternalGeneralParsed {
+        system_id: &'a str,
+        public_id: Option<&'a str>,
+    },
+    ExternalGeneralUnparsed {
+        system_id: &'a str,
+        public_id: Option<&'a str>,
+        ndata: &'a str,
+    },
+    ExternalParameter {
+        system_id: &'a str,
+        public_id: Option<&'a str>,
+    },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ExternalId<'a> {
-    System(&'a str),
-    Public(&'a str, &'a str),
-}
-
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Attribute<'a> {
     pub name: &'a str,
     pub value: &'a str,
@@ -926,6 +954,13 @@ impl<'a> TokenStream<'a> {
         Ok(matches!(current, 0x20 | 0x9 | 0xD | 0xA))
     }
 
+    fn has_preceeding_whitespace(&mut self) -> bool {
+        match self.peek_prev() {
+            Some(c) => matches!(c, 0x20 | 0x9 | 0xD | 0xA),
+            None => false,
+        }
+    }
+
     fn expect_and_consume_whitespace(&mut self, item: &'static str) -> ParseResult<()> {
         if !self.is_white_space()? {
             return Err(ParseError::MissingRequiredWhitespace(item, self.span_single()));
@@ -1028,7 +1063,7 @@ impl Parser {
 
         let _doc = Self::parse_from_str(&source)?;
 
-        // dbg!(_doc);
+        dbg!(_doc);
 
         Ok(())
     }
@@ -1256,8 +1291,7 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
 
     stream.consume_whitespace();
     let encoding = if stream.starts_with("encoding") {
-        let prev = stream.peek_prev();
-        if !matches!(prev, Some(b' ' | b'\t' | b'\r' | b'\n')) {
+        if !stream.has_preceeding_whitespace() {
             return Err(ParseError::InvalidDeclaration(
                 "space before encoding",
                 stream.span_single(),
@@ -1272,8 +1306,7 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
 
     stream.consume_whitespace();
     let standalone = if stream.peek_seq("standalone") {
-        let prev = stream.peek_prev();
-        if !matches!(prev, Some(b' ' | b'\t' | b'\r' | b'\n')) {
+        if !stream.has_preceeding_whitespace() {
             return Err(ParseError::InvalidDeclaration(
                 "space before standalone",
                 stream.span_single(),
@@ -1399,9 +1432,11 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     ctx.doc.name = Some(name);
     stream.consume_whitespace();
 
-    if let Some(external_id) = parse_external_id(stream, Optionality::Optional)? {
-        ctx.entities
-            .insert(name, Entity::new(name, EntityType::External(external_id)));
+    if let Some((system_id, public_id)) = parse_external_id(stream, Optionality::Optional)? {
+        ctx.entities.insert(
+            name,
+            Entity::new(name, EntityType::ExternalGeneralParsed { system_id, public_id }),
+        );
     }
 
     stream.consume_whitespace();
@@ -1633,14 +1668,14 @@ fn parse_notation_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
 fn parse_external_id<'a>(
     stream: &mut TokenStream<'a>,
     optionality: Optionality,
-) -> ParseResult<Option<ExternalId<'a>>> {
+) -> ParseResult<Option<(&'a str, Option<&'a str>)>> {
     if stream.peek_seq("SYSTEM") {
         stream.advance(6);
         stream.expect_and_consume_whitespace("SYSTEM")?;
 
         let system_literal = parse_system_literal(stream)?;
 
-        return Ok(Some(ExternalId::System(system_literal)));
+        return Ok(Some((system_literal, None)));
     }
 
     if stream.peek_seq("PUBLIC") {
@@ -1651,7 +1686,7 @@ fn parse_external_id<'a>(
         stream.expect_and_consume_whitespace("public identifier")?;
         let system_literal = parse_system_literal(stream)?;
 
-        return Ok(Some(ExternalId::Public(pub_id_literal, system_literal)));
+        return Ok(Some((system_literal, Some(pub_id_literal))));
     }
 
     if optionality == Optionality::Required {
@@ -1854,10 +1889,12 @@ fn parse_pe_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pars
             return Ok(());
         }
         ctx.entities
-            .insert(name, Entity::new(name, EntityType::Internal(value)));
-    } else if let Some(external_id) = parse_external_id(stream, Optionality::Required)? {
-        ctx.entities
-            .insert(name, Entity::new(name, EntityType::External(external_id)));
+            .insert(name, Entity::new(name, EntityType::InternalGeneral { value }));
+    } else if let Some((system_id, public_id)) = parse_external_id(stream, Optionality::Required)? {
+        ctx.entities.insert(
+            name,
+            Entity::new(name, EntityType::ExternalGeneralParsed { system_id, public_id }),
+        );
     }
 
     stream.consume_whitespace();
@@ -1879,17 +1916,38 @@ fn parse_entity_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> 
             return Ok(());
         }
         ctx.entities
-            .insert(name, Entity::new(name, EntityType::Internal(value)));
+            .insert(name, Entity::new(name, EntityType::InternalGeneral { value }));
     } else {
-        if let Some(external_id) = parse_external_id(stream, Optionality::Required)? {
-            ctx.entities
-                .insert(name, Entity::new(name, EntityType::External(external_id)));
-        }
-        let consumed = stream.consume_whitespace();
-        match stream.peek_seq("NDATA") {
-            true if consumed == 0 => panic!("Missing required whitespace before NDataDecl!"),
-            true => parse_ndata_decl(stream)?,
-            false => (),
+        let Some((system_id, public_id)) = parse_external_id(stream, Optionality::Required)? else {
+            // TODO: Error type?
+            return Err(ParseError::WTF(stream.span_single()));
+        };
+
+        stream.consume_whitespace();
+
+        if stream.peek_seq("NDATA") {
+            if !stream.has_preceeding_whitespace() {
+                // TODO: Error type?
+                return Err(ParseError::WTF(stream.span_single()));
+            }
+
+            let ndata = parse_ndata_decl(stream)?;
+            ctx.entities.insert(
+                name,
+                Entity::new(
+                    name,
+                    EntityType::ExternalGeneralUnparsed {
+                        system_id,
+                        public_id,
+                        ndata,
+                    },
+                ),
+            );
+        } else {
+            ctx.entities.insert(
+                name,
+                Entity::new(name, EntityType::ExternalGeneralParsed { system_id, public_id }),
+            );
         }
     }
 
@@ -1902,12 +1960,12 @@ fn parse_entity_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> 
 // NDataDecl  ::=  S 'NDATA' S Name
 // If the NDataDecl is present, this is a general unparsed entity; otherwise it is a parsed entity.
 // VC: The Name MUST match the declared name of a notation.
-fn parse_ndata_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+fn parse_ndata_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
     // TODO: VC
     stream.advance(5);
     stream.expect_and_consume_whitespace("NDATA")?;
-    let _name = parse_name(stream)?;
-    Ok(())
+    let name = parse_name(stream)?;
+    Ok(name)
 }
 
 // EntityValue  ::=  '"' ([^%&"] | PEReference | Reference)* '"' |  "'" ([^%&'] | PEReference | Reference)* "'"
@@ -2206,17 +2264,24 @@ fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>
             Ok('&') => {
                 owned = true;
                 let entity_ref = parse_entity_reference(stream, ctx)?;
-                match entity_ref.type_ {
-                    EntityType::Internal(value) => {
+                match entity_ref.entity_type {
+                    EntityType::InternalGeneral { value } => {
+                        if value.contains('<') {
+                            return Err(ParseError::UnescapedLTInAttrValue(stream.span_from(start)));
+                        }
                         if value.contains('&') {
                             normalized.extend(expand_entity_ref(stream, ctx, value, false)?);
                         } else {
                             normalized.extend_from_slice(value.as_bytes());
                         }
                     }
-                    EntityType::External(_external_id) => {
+                    EntityType::ExternalGeneralUnparsed { .. }
+                    | EntityType::ExternalParameter { .. }
+                    | EntityType::ExternalGeneralParsed { .. } => {
                         return Err(ParseError::ExternalEntityRefInAttribute(stream.span_from(start)));
                     }
+                    EntityType::InternalParameter { .. } => unimplemented!("internal parameter entity"),
+                    EntityType::InternalPredefined { .. } => unimplemented!("internal predefined"),
                 }
             }
             Ok('<') => return Err(ParseError::UnescapedLTInAttrValue(stream.span_single())),
@@ -2303,21 +2368,25 @@ fn expand_entity_ref<'a>(
                     }
                 };
 
-                match entity.type_ {
-                    EntityType::Internal(value) => {
+                match entity.entity_type {
+                    EntityType::InternalGeneral { value } => {
                         if value.contains('&') {
                             expanded.extend(expand_entity_ref(stream, ctx, value, false)?);
                         } else {
                             expanded.extend(value.as_bytes());
                         }
                     }
-                    EntityType::External(_external_id) => {
+                    EntityType::ExternalGeneralUnparsed { .. }
+                    | EntityType::ExternalParameter { .. }
+                    | EntityType::ExternalGeneralParsed { .. } => {
                         if !allow_external {
                             return Err(ParseError::ExternalEntityRefInAttribute(
                                 stream.span_from(stream.pos - entity_ref.len()),
                             ));
                         }
                     }
+                    EntityType::InternalParameter { .. } => unimplemented!("internal parameter entity"),
+                    EntityType::InternalPredefined { .. } => unimplemented!("internal predefined"),
                 }
             }
             b => {
@@ -2411,10 +2480,15 @@ fn parse_content<'a>(
             b'<' if stream.starts_with("<![CDATA[") => content.push(parse_cdata(stream, ctx, Some(parent_id))?),
             b'<' if stream.starts_with("<!--") => content.push(parse_comment(stream, ctx, Some(parent_id))?),
             b'<' if stream.starts_with("</") => break,
-
             b'&' => {
-                // TODO
-                let _ = parse_entity_reference(stream, ctx)?;
+                let entity_ref = parse_entity_reference(stream, ctx)?;
+                if let EntityType::ExternalGeneralUnparsed { .. } = entity_ref.entity_type {
+                    let name = entity_ref.name;
+                    return Err(ParseError::IllegalUnparsedEntity(
+                        name.to_string(),
+                        stream.span_from(stream.pos - (name.len() + 2)),
+                    ));
+                }
             }
             b'<' => content.push(parse_element(stream, ctx, ElementType::Child, Some(parent_id))?),
             _ => {
@@ -3237,8 +3311,10 @@ mod test {
         let mut ctx = context();
         let mut stream = stream_from("Hello, &world;!");
         let entity_ref = "Hello, &world;!";
-        ctx.entities
-            .insert("world", Entity::new("world", EntityType::Internal("Mary Sue")));
+        ctx.entities.insert(
+            "world",
+            Entity::new("world", EntityType::InternalGeneral { value: "Mary Sue" }),
+        );
 
         let expanded = expand_entity_ref(&mut stream, &mut ctx, entity_ref, false).unwrap();
         let res = String::from_utf8_lossy(&expanded);
@@ -3250,11 +3326,14 @@ mod test {
         let mut ctx = context();
         let mut stream = stream_from("Hello, &world;!");
         let entity_ref = "Hello, &world;";
-        ctx.entities.insert("a", Entity::new("a", EntityType::Internal("rld!")));
         ctx.entities
-            .insert("b", Entity::new("b", EntityType::Internal("Wo&a;")));
+            .insert("a", Entity::new("a", EntityType::InternalGeneral { value: "rld!" }));
         ctx.entities
-            .insert("world", Entity::new("world", EntityType::Internal("&b;")));
+            .insert("b", Entity::new("b", EntityType::InternalGeneral { value: "Wo&a;" }));
+        ctx.entities.insert(
+            "world",
+            Entity::new("world", EntityType::InternalGeneral { value: "&b;" }),
+        );
 
         let expanded = expand_entity_ref(&mut stream, &mut ctx, entity_ref, false).unwrap();
         let res = String::from_utf8_lossy(&expanded);
@@ -3267,11 +3346,15 @@ mod test {
         let mut stream = stream_from("one &two; three &four; &five;");
         let entity_ref = "one &two; three &four; &five;";
         ctx.entities
-            .insert("two", Entity::new("two", EntityType::Internal("two")));
-        ctx.entities
-            .insert("four", Entity::new("four", EntityType::Internal("four")));
-        ctx.entities
-            .insert("five", Entity::new("five", EntityType::Internal("five")));
+            .insert("two", Entity::new("two", EntityType::InternalGeneral { value: "two" }));
+        ctx.entities.insert(
+            "four",
+            Entity::new("four", EntityType::InternalGeneral { value: "four" }),
+        );
+        ctx.entities.insert(
+            "five",
+            Entity::new("five", EntityType::InternalGeneral { value: "five" }),
+        );
 
         let expanded = expand_entity_ref(&mut stream, &mut ctx, entity_ref, false).unwrap();
         let res = String::from_utf8_lossy(&expanded);
