@@ -80,6 +80,9 @@ pub enum ParseError {
     /// Well formed Element Type declarations must contain a valid name and [`Content Spec`]
     InvalidElementTypeDecl(Span),
 
+    /// Invalid Encoding Name
+    InvalidEncodingName(Span),
+
     /// Invalid Entity Reference
     InvalidEntityReference(&'static str, Span),
 
@@ -126,8 +129,14 @@ pub enum ParseError {
     /// A Document must have at least one element
     MissingRoot,
 
+    /// Missing Required External Identifier
+    MissingRequiredExternalId(Span),
+
     /// Missing Required Whitespace
     MissingRequiredWhitespace(&'static str, Span),
+
+    /// Recursive Entity Reference
+    RecursiveEntityReference(String, Span),
 
     /// Reserved Namespace
     ///
@@ -304,6 +313,10 @@ impl std::fmt::Display for ParseError {
                 )?;
                 writeln!(f, "{span}")
             }
+            ParseError::InvalidEncodingName(span) => {
+                writeln!(f, "error:{}:{}: invalid encoding", span.row, span.col_start)?;
+                writeln!(f, "{span}")
+            }
             ParseError::InvalidEntityReference(reason, span) => {
                 writeln!(
                     f,
@@ -371,10 +384,22 @@ impl std::fmt::Display for ParseError {
             ParseError::MissingRoot => {
                 writeln!(f, "error: no root element found")
             }
+            ParseError::MissingRequiredExternalId(span) => {
+                writeln!(f, "error:{}:{}: expected ExternalId", span.row, span.col_start)?;
+                writeln!(f, "{span}")
+            }
             ParseError::MissingRequiredWhitespace(item, span) => {
                 writeln!(
                     f,
                     "error:{}:{}: space required after '{item}'",
+                    span.row, span.col_start
+                )?;
+                writeln!(f, "{span}")
+            }
+            ParseError::RecursiveEntityReference(value, span) => {
+                writeln!(
+                    f,
+                    "error:{}:{}: recursive entity reference detected in '{value}'",
                     span.row, span.col_start
                 )?;
                 writeln!(f, "{span}")
@@ -408,7 +433,7 @@ impl std::fmt::Display for ParseError {
                 )
             }
             ParseError::UnexpectedCharacter(expected, actual, span) => {
-                writeln!(f, "error:{}:{}: unexpected character at", span.row, span.col_start)?;
+                writeln!(f, "error:{}:{}: unexpected character", span.row, span.col_start)?;
                 writeln!(f, "  Expected: '{}'\n  Actual:   '{}'", expected, actual)?;
                 write!(f, "{span}")
             }
@@ -558,11 +583,16 @@ pub struct Notation<'a> {
 pub struct Entity<'a> {
     name: &'a str,
     entity_type: EntityType<'a>,
+    expanding: bool,
 }
 
 impl<'a> Entity<'a> {
     fn new(name: &'a str, entity_type: EntityType<'a>) -> Self {
-        Self { name, entity_type }
+        Self {
+            name,
+            entity_type,
+            expanding: false,
+        }
     }
 }
 
@@ -1041,6 +1071,20 @@ impl<'a> Context<'a> {
     fn push_node(&mut self, node: Node<'a>) {
         self.doc.nodes.push(node)
     }
+
+    fn get_entity(&mut self, stream: &mut TokenStream<'a>, name: &'a str) -> ParseResult<&Entity<'a>> {
+        self.entities.get(name).ok_or(ParseError::UnknownEntityReference(
+            name.to_string(),
+            stream.span_from(stream.pos - name.len()),
+        ))
+    }
+
+    fn get_entity_mut(&mut self, stream: &mut TokenStream<'a>, name: &'a str) -> ParseResult<&mut Entity<'a>> {
+        self.entities.get_mut(name).ok_or(ParseError::UnknownEntityReference(
+            name.to_string(),
+            stream.span_from(stream.pos - name.len()),
+        ))
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -1299,7 +1343,28 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
         }
         stream.advance(8);
         stream.expect_byte(b'=')?;
-        Some(parse_attribute_value(stream, ctx)?)
+
+        let delimiter = stream.consume_quote()?;
+        let start = stream.pos;
+
+        if !stream.current_byte()?.is_ascii_alphabetic() {
+            return Err(ParseError::InvalidEncodingName(stream.span_single()));
+        }
+
+        stream.advance(1);
+
+        loop {
+            let c = stream.current_byte()?;
+            match c {
+                c if c == delimiter => break,
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' => stream.advance(1),
+                _ => break,
+            }
+        }
+
+        stream.expect_byte(delimiter)?;
+        let name = stream.slice_from(start);
+        Some(name)
     } else {
         None
     };
@@ -1690,8 +1755,7 @@ fn parse_external_id<'a>(
     }
 
     if optionality == Optionality::Required {
-        // TODO
-        panic!("Required ExternalID !");
+        return Err(ParseError::MissingRequiredExternalId(stream.span_single()));
     } else {
         Ok(None)
     }
@@ -1973,8 +2037,6 @@ fn parse_entity_value<'a>(stream: &mut TokenStream<'a>, _name: &'a str) -> Parse
     let delimiter = stream.consume_quote()?;
     let start = stream.pos;
 
-    // TODO: Parse references and recursion detection
-    //  - A parsed entity MUST NOT contain a recursive reference to it either directly or indirectly.
     loop {
         let current_byte = stream.current_byte()?;
         if current_byte >= 0x80 {
@@ -2263,14 +2325,19 @@ fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>
             }
             Ok('&') => {
                 owned = true;
-                let entity_ref = parse_entity_reference(stream, ctx)?;
-                match entity_ref.entity_type {
+                let start = stream.pos;
+                let entity_name = parse_entity_ref(stream)?;
+                let entity_type = ctx.get_entity(stream, entity_name)?.entity_type;
+                match entity_type {
                     EntityType::InternalGeneral { value } => {
                         if value.contains('<') {
                             return Err(ParseError::UnescapedLTInAttrValue(stream.span_from(start)));
                         }
+
                         if value.contains('&') {
+                            ctx.get_entity_mut(stream, entity_name)?.expanding = true;
                             normalized.extend(expand_entity_ref(stream, ctx, value, false)?);
+                            ctx.get_entity_mut(stream, entity_name)?.expanding = false;
                         } else {
                             normalized.extend_from_slice(value.as_bytes());
                         }
@@ -2323,6 +2390,7 @@ fn expand_entity_ref<'a>(
 ) -> ParseResult<Vec<u8>> {
     // TODO:
     //  - Character Referecnes
+    let start = stream.pos;
     let mut expanded = vec![];
     let mut pos = 0;
     let mut ref_start = 0;
@@ -2367,6 +2435,13 @@ fn expand_entity_ref<'a>(
                         ));
                     }
                 };
+
+                if entity.expanding {
+                    return Err(ParseError::RecursiveEntityReference(
+                        entity.name.to_string(),
+                        stream.span_from(start),
+                    ));
+                }
 
                 match entity.entity_type {
                     EntityType::InternalGeneral { value } => {
@@ -2481,13 +2556,30 @@ fn parse_content<'a>(
             b'<' if stream.starts_with("<!--") => content.push(parse_comment(stream, ctx, Some(parent_id))?),
             b'<' if stream.starts_with("</") => break,
             b'&' => {
-                let entity_ref = parse_entity_reference(stream, ctx)?;
-                if let EntityType::ExternalGeneralUnparsed { .. } = entity_ref.entity_type {
-                    let name = entity_ref.name;
-                    return Err(ParseError::IllegalUnparsedEntity(
-                        name.to_string(),
-                        stream.span_from(stream.pos - (name.len() + 2)),
-                    ));
+                let start = stream.pos;
+                let entity_name = parse_entity_ref(stream)?;
+                let entity_type = ctx.get_entity(stream, entity_name)?.entity_type;
+                match entity_type {
+                    EntityType::InternalGeneral { value } => {
+                        if value.contains('<') {
+                            return Err(ParseError::UnescapedLTInAttrValue(stream.span_from(start)));
+                        }
+                        if value.contains('&') {
+                            ctx.get_entity_mut(stream, entity_name)?.expanding = true;
+                            let _ = expand_entity_ref(stream, ctx, value, true)?;
+                            ctx.get_entity_mut(stream, entity_name)?.expanding = false;
+                        }
+                    }
+                    EntityType::ExternalGeneralUnparsed { .. }
+                    | EntityType::ExternalParameter { .. }
+                    | EntityType::ExternalGeneralParsed { .. } => {
+                        return Err(ParseError::IllegalUnparsedEntity(
+                            entity_name.to_string(),
+                            stream.span_from(stream.pos - (entity_name.len() + 2)),
+                        ));
+                    }
+                    EntityType::InternalParameter { .. } => unimplemented!("internal parameter entity"),
+                    EntityType::InternalPredefined { .. } => unimplemented!("internal predefined"),
                 }
             }
             b'<' => content.push(parse_element(stream, ctx, ElementType::Child, Some(parent_id))?),
@@ -2571,19 +2663,11 @@ fn parse_character_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<ch
     Ok(c)
 }
 
-fn parse_entity_reference<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<Entity<'a>> {
+fn parse_entity_ref<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
     stream.expect_byte(b'&')?;
-    let start = stream.pos;
     let name = parse_name(stream)?;
     stream.expect_byte(b';')?;
-
-    match ctx.entities.get(name) {
-        Some(value) => Ok(*value),
-        None => Err(ParseError::UnknownEntityReference(
-            name.to_string(),
-            stream.span_from(start),
-        )),
-    }
+    Ok(name)
 }
 
 // CDSect   ::=  CDStart CData CDEnd
