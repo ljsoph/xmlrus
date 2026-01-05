@@ -703,6 +703,7 @@ pub enum NodeKind<'a> {
 #[derive(Clone, Debug, PartialEq)]
 struct ElementTypeDecl<'a> {
     name: &'a str,
+    raw: Option<&'a str>,
     content_spec: ContentSpec<'a>,
 }
 
@@ -1770,7 +1771,7 @@ fn parse_external_id<'a>(
     }
 
     if optionality == Optionality::Required {
-        return Err(ParseError::MissingRequiredExternalId(stream.span_single()));
+        Err(ParseError::MissingRequiredExternalId(stream.span_single()))
     } else {
         Ok(None)
     }
@@ -1845,12 +1846,14 @@ fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'
     if stream.peek_seq("EMPTY") {
         ctx.element_types.push(ElementTypeDecl {
             name,
+            raw: None,
             content_spec: ContentSpec::Empty,
         });
         stream.advance(5);
     } else if stream.peek_seq("ANY") {
         ctx.element_types.push(ElementTypeDecl {
             name,
+            raw: None,
             content_spec: ContentSpec::Any,
         });
         stream.advance(3);
@@ -1861,10 +1864,13 @@ fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'
         if stream.peek_seq("#PCDATA") {
             parse_mixed_content(stream, ctx, name)?;
         } else {
+            let start = stream.pos - 1;
             let children = parse_element_content_children(stream, ctx)?;
             let repetition = parse_repetition(stream)?;
+            let raw = stream.slice_from(start);
             ctx.element_types.push(ElementTypeDecl {
                 name,
+                raw: Some(raw),
                 content_spec: ContentSpec::ElementContent(ElementContent { children, repetition }),
             });
         }
@@ -1882,6 +1888,7 @@ fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'
 fn parse_mixed_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, name: &'a str) -> ParseResult<()> {
     let mut names = vec![];
     let mut repeated = false;
+    let start = stream.pos - 1;
 
     stream.advance(7);
     stream.consume_whitespace();
@@ -1922,8 +1929,11 @@ fn parse_mixed_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, 
         repeated = true;
     }
 
+    let raw = stream.slice_from(start);
+    dbg!(&raw);
     ctx.element_types.push(ElementTypeDecl {
         name,
+        raw: Some(raw),
         content_spec: ContentSpec::MixedContent(names, repeated),
     });
 

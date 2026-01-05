@@ -1,10 +1,7 @@
-use crate::ContentParticle;
 use crate::ContentSpec;
 use crate::Context;
-use crate::ElementContentChildren;
 use crate::EntityType;
 use crate::NodeKind;
-use crate::Repetition;
 
 use std::io::Write;
 
@@ -51,7 +48,7 @@ pub fn pretty_print(options: Options, ctx: &Context) -> std::io::Result<()> {
     }
 
     if options.dtd {
-        pp_dtd(&mut writer, &mut indent, tab_size, &ctx)?;
+        pp_dtd(&mut writer, &mut indent, tab_size, ctx)?;
     }
 
     Ok(())
@@ -77,17 +74,17 @@ where
         writeln!(writer, "{:>indent$}Entity ({})", "", entity.name)?;
         *indent += tab_size;
         match entity.entity_type {
-            EntityType::InternalGeneral { value } => writeln!(writer, "{:>indent$}INTERNAL_GENERAL: {value}", "")?,
-            EntityType::InternalParameter { value } => writeln!(writer, "{:>indent$}INTERNAL_PARAMETER: {value}", "")?,
+            EntityType::InternalGeneral { value } => writeln!(writer, "{:>indent$}INTERNAL_GENERAL ({value})", "")?,
+            EntityType::InternalParameter { value } => writeln!(writer, "{:>indent$}INTERNAL_PARAMETER ({value})", "")?,
             EntityType::InternalPredefined { value } => {
-                writeln!(writer, "{:>indent$}INTERNAL_PREDEFINED: {value}", "")?
+                writeln!(writer, "{:>indent$}INTERNAL_PREDEFINED ({value})", "")?
             }
             EntityType::ExternalGeneralParsed { system_id, public_id } => {
                 writeln!(writer, "{:>indent$}EXTERNAL_GENERAL_PARSED", "")?;
                 *indent += tab_size;
-                writeln!(writer, "{:>indent$}SystemId: {system_id}", "")?;
+                writeln!(writer, "{:>indent$}SystemId ({system_id})", "")?;
                 if let Some(public_id) = public_id {
-                    writeln!(writer, "{:>indent$}PublicId: {public_id}", "")?;
+                    writeln!(writer, "{:>indent$}PublicId ({public_id})", "")?;
                 }
                 *indent -= tab_size;
             }
@@ -98,9 +95,9 @@ where
             } => {
                 writeln!(writer, "{:>indent$}EXTERNAL_GENERAL_UNPARSED", "")?;
                 *indent += tab_size;
-                writeln!(writer, "{:>indent$}SystemId: {system_id}", "")?;
+                writeln!(writer, "{:>indent$}SystemId ({system_id})", "")?;
                 if let Some(public_id) = public_id {
-                    writeln!(writer, "{:>indent$}PublicId: {public_id}", "")?;
+                    writeln!(writer, "{:>indent$}PublicId ({public_id})", "")?;
                 }
                 writeln!(writer, "{:>indent$}NDATA: {ndata}", "")?;
                 *indent -= tab_size;
@@ -108,9 +105,9 @@ where
             EntityType::ExternalParameter { system_id, public_id } => {
                 writeln!(writer, "{:>indent$}EXTERNAL_PARAMETER", "")?;
                 *indent += tab_size;
-                writeln!(writer, "{:>indent$}SystemId: {system_id}", "")?;
+                writeln!(writer, "{:>indent$}SystemId ({system_id})", "")?;
                 if let Some(public_id) = public_id {
-                    writeln!(writer, "{:>indent$}PublicId: {public_id}", "")?;
+                    writeln!(writer, "{:>indent$}PublicId: ({public_id})", "")?;
                 }
                 *indent -= tab_size;
             }
@@ -128,99 +125,14 @@ where
             content_spec(&element_decl.content_spec)
         )?;
 
-        match &element_decl.content_spec {
-            ContentSpec::Empty | ContentSpec::Any => {}
-            ContentSpec::MixedContent(items, repeated) => {
-                write!(writer, " (#PCDATA | ")?;
-                write!(writer, "{}", items.join(" | "))?;
-                write!(writer, ")")?;
-                if *repeated {
-                    write!(writer, "*")?;
-                }
-            }
-
-            ContentSpec::ElementContent(element_content) => match &element_content.children {
-                ElementContentChildren::Choice(content_particles) => {
-                    pp_content_particles(content_particles, writer, &element_content.repetition, '|', '|')?
-                }
-                ElementContentChildren::Seq(content_particles) => {
-                    pp_content_particles(content_particles, writer, &element_content.repetition, ',', ',')?
-                }
-            },
+        if let Some(raw) = element_decl.raw {
+            // Remove any repetative whitespace
+            let words = raw.split_whitespace().collect::<Vec<_>>();
+            write!(writer, " {}", words.join(" "))?;
         }
+
         writeln!(writer)?;
     }
-    Ok(())
-}
-
-fn pp_content_particles<W>(
-    content: &Vec<ContentParticle>,
-    writer: &mut std::io::BufWriter<W>,
-    repetition: &Repetition,
-    outer_sep: char,
-    inner_sep: char,
-) -> std::io::Result<()>
-where
-    W: ?Sized + std::io::Write,
-{
-    write!(writer, " (")?;
-    let mut iter = content.iter();
-
-    if let Some(first) = iter.next() {
-        pp_content_particle(first, writer, outer_sep, true, false)?;
-    }
-
-    loop {
-        let one = iter.next();
-        let two = iter.next();
-
-        match (one, two) {
-            (Some(c), None) => {
-                pp_content_particle(c, writer, inner_sep, false, true)?;
-                break;
-            }
-            (Some(f), Some(s)) => {
-                pp_content_particle(f, writer, inner_sep, false, false)?;
-                pp_content_particle(s, writer, inner_sep, false, false)?;
-            }
-            (None, None) | (None, Some(_)) => break,
-        }
-    }
-    write!(writer, ")")?;
-    write!(writer, "{}", repetition.to_string())?;
-
-    Ok(())
-}
-
-fn pp_content_particle<W: ?Sized + std::io::Write>(
-    content_particle: &ContentParticle,
-    writer: &mut std::io::BufWriter<W>,
-    sep: char,
-    first: bool,
-    last: bool,
-) -> std::io::Result<()> {
-    match content_particle {
-        ContentParticle::Name { name, repetition } => {
-            if !first {
-                write!(writer, " ")?;
-            }
-
-            write!(writer, "{}", name)?;
-
-            if sep == '|' && !last {
-                write!(writer, " ")?;
-            }
-
-            if !last {
-                write!(writer, "{}", sep)?;
-            }
-
-            write!(writer, "{}", repetition.to_string())?;
-        }
-        ContentParticle::Choice { content, repetition } => pp_content_particles(content, writer, repetition, sep, '|')?,
-        ContentParticle::Seq { content, repetition } => pp_content_particles(content, writer, repetition, sep, ',')?,
-    }
-
     Ok(())
 }
 
