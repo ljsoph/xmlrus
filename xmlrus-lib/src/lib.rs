@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 type ParseResult<T> = std::result::Result<T, ParseError>;
 
+mod pretty;
 mod validate;
 
 const XML_PREFIX: &str = "xml";
@@ -699,30 +700,30 @@ pub enum NodeKind<'a> {
 }
 
 #[allow(unused)]
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct ElementTypeDecl<'a> {
     name: &'a str,
     content_spec: ContentSpec<'a>,
 }
 
 #[allow(unused)]
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum ContentSpec<'a> {
     Empty,
     Any,
-    MixedContent(Vec<&'a str>),
+    MixedContent(Vec<&'a str>, bool),
     ElementContent(ElementContent<'a>),
 }
 
 #[allow(unused)]
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct ElementContent<'a> {
     children: ElementContentChildren<'a>,
     repetition: Repetition,
 }
 
 #[allow(unused)]
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum ContentParticle<'a> {
     Name {
         name: &'a str,
@@ -739,13 +740,13 @@ enum ContentParticle<'a> {
 }
 
 #[allow(unused)]
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum ElementContentChildren<'a> {
     Choice(Vec<ContentParticle<'a>>),
     Seq(Vec<ContentParticle<'a>>),
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 enum Repetition {
     // one or more
     Plus,
@@ -755,6 +756,17 @@ enum Repetition {
     QuestionMark,
     // once
     Once,
+}
+
+impl std::fmt::Display for Repetition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Repetition::Plus => write!(f, "+"),
+            Repetition::Star => write!(f, "*"),
+            Repetition::QuestionMark => write!(f, "?"),
+            Repetition::Once => write!(f, ""),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -1107,7 +1119,7 @@ impl Parser {
 
         let _doc = Self::parse_from_str(&source)?;
 
-        dbg!(_doc);
+        // dbg!(_doc);
 
         Ok(())
     }
@@ -1135,6 +1147,9 @@ impl Parser {
         };
 
         parse_document(&mut stream, &mut ctx)?;
+
+        let options = pretty::Options::default();
+        pretty::pretty_print(options, &ctx).unwrap();
 
         Ok(ctx.doc)
     }
@@ -1362,8 +1377,8 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
             }
         }
 
-        stream.expect_byte(delimiter)?;
         let name = stream.slice_from(start);
+        stream.expect_byte(delimiter)?;
         Some(name)
     } else {
         None
@@ -1866,6 +1881,7 @@ fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'
 // Mixed  ::=  '(' S? '#PCDATA' (S? '|' S? Name)* S? ')*' | '(' S? '#PCDATA' S? ')'
 fn parse_mixed_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, name: &'a str) -> ParseResult<()> {
     let mut names = vec![];
+    let mut repeated = false;
 
     stream.advance(7);
     stream.consume_whitespace();
@@ -1873,7 +1889,7 @@ fn parse_mixed_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, 
     if stream.current_byte()? == b')' {
         stream.advance(1);
         if let Ok(b'*') = stream.current_byte() {
-            // TODO: something with the '*'
+            repeated = true;
             stream.advance(1);
         }
     } else {
@@ -1903,11 +1919,12 @@ fn parse_mixed_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, 
 
         stream.advance(1);
         stream.expect_byte(b'*')?;
+        repeated = true;
     }
 
     ctx.element_types.push(ElementTypeDecl {
         name,
-        content_spec: ContentSpec::MixedContent(names),
+        content_spec: ContentSpec::MixedContent(names, repeated),
     });
 
     Ok(())
