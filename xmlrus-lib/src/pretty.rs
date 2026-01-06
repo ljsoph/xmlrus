@@ -133,6 +133,59 @@ where
 
         writeln!(writer)?;
     }
+
+    for attr_decl in ctx.attr_decls.values() {
+        match &attr_decl.att_defs {
+            Some(att_defs) => {
+                for att_def in att_defs {
+                    write!(
+                        writer,
+                        "{:>indent$}AttrDecl ({}) {}",
+                        "", attr_decl.element_name, att_def.name
+                    )?;
+
+                    match &att_def.att_type {
+                        crate::AttType::StringType => write!(writer, " CDATA")?,
+                        crate::AttType::TokenizedType(tokenized_type) => {
+                            let tt = match tokenized_type {
+                                crate::TokenizedType::Id => " ID",
+                                crate::TokenizedType::IdRef => " IDREF",
+                                crate::TokenizedType::IdRefs => " IDREFS",
+                                crate::TokenizedType::Entity => " ENTITY",
+                                crate::TokenizedType::Entities => " ENTITIES",
+                                crate::TokenizedType::NmToken => " NMTOKEN",
+                                crate::TokenizedType::NmTokens => " NMTOKENS",
+                            };
+                            write!(writer, " {tt}")?;
+                        }
+                        crate::AttType::EnumeratedType(enumerated_type) => match enumerated_type {
+                            crate::EnumeratedType::NotationType(items) => {
+                                write!(writer, " NOTATION ({})", items.join(" | "))?;
+                            }
+                            crate::EnumeratedType::Enumeration(items) => {
+                                write!(writer, " ENUMERATION ({})", items.join(" | "))?;
+                            }
+                        },
+                    }
+
+                    match &att_def.default_decl {
+                        crate::DefaultDecl::Required => write!(writer, " REQUIRED")?,
+                        crate::DefaultDecl::Implied => write!(writer, " IMPLIED")?,
+                        crate::DefaultDecl::Fixed { fixed, value } => {
+                            if *fixed {
+                                write!(writer, " FIXED")?;
+                            }
+                            write!(writer, "=\"{value}\"")?;
+                        }
+                    }
+
+                    writeln!(writer)?;
+                }
+            }
+            None => {}
+        }
+    }
+
     Ok(())
 }
 

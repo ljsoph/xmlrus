@@ -1689,11 +1689,13 @@ fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
                     b')' => break,
                     b'|' => {
                         stream.advance(1);
+                        stream.consume_whitespace();
                         names.push(parse_name(stream)?);
                     }
                     _ => return Err(ParseError::WTF(stream.span_single())),
                 }
             }
+            stream.advance(1);
             AttType::EnumeratedType(EnumeratedType::NotationType(names))
         } else if stream.starts_with("(") {
             stream.advance(1);
