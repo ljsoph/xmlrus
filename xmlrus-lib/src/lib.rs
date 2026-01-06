@@ -699,7 +699,6 @@ pub enum NodeKind<'a> {
     CData(&'a str),
 }
 
-#[allow(unused)]
 #[derive(Clone, Debug, PartialEq)]
 struct ElementTypeDecl<'a> {
     name: &'a str,
@@ -707,7 +706,6 @@ struct ElementTypeDecl<'a> {
     content_spec: ContentSpec<'a>,
 }
 
-#[allow(unused)]
 #[derive(Clone, Debug, PartialEq)]
 enum ContentSpec<'a> {
     Empty,
@@ -716,14 +714,12 @@ enum ContentSpec<'a> {
     ElementContent(ElementContent<'a>),
 }
 
-#[allow(unused)]
 #[derive(Clone, Debug, PartialEq)]
 struct ElementContent<'a> {
     children: ElementContentChildren<'a>,
     repetition: Repetition,
 }
 
-#[allow(unused)]
 #[derive(Clone, Debug, PartialEq)]
 enum ContentParticle<'a> {
     Name {
@@ -740,7 +736,6 @@ enum ContentParticle<'a> {
     },
 }
 
-#[allow(unused)]
 #[derive(Clone, Debug, PartialEq)]
 enum ElementContentChildren<'a> {
     Choice(Vec<ContentParticle<'a>>),
@@ -765,9 +760,53 @@ impl std::fmt::Display for Repetition {
             Repetition::Plus => write!(f, "+"),
             Repetition::Star => write!(f, "*"),
             Repetition::QuestionMark => write!(f, "?"),
-            Repetition::Once => write!(f, ""),
+            Repetition::Once => Ok(()),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct AttributeDecl<'a> {
+    element_name: &'a str,
+    att_defs: Option<Vec<AttributeDef<'a>>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct AttributeDef<'a> {
+    name: &'a str,
+    att_type: AttType<'a>,
+    default_decl: DefaultDecl<'a>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum AttType<'a> {
+    StringType,
+    TokenizedType(TokenizedType),
+    EnumeratedType(EnumeratedType<'a>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum TokenizedType {
+    Id,
+    IdRef,
+    IdRefs,
+    Entity,
+    Entities,
+    NmToken,
+    NmTokens,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum EnumeratedType<'a> {
+    NotationType(Vec<&'a str>),
+    Enumeration(Vec<&'a str>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum DefaultDecl<'a> {
+    Required,
+    Implied,
+    Fixed { fixed: bool, value: &'a str },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -1062,6 +1101,7 @@ pub struct Context<'a> {
     prefixes: HashSet<&'a str>,
     entities: HashMap<&'a str, Entity<'a>>,
     notations: HashMap<&'a str, Notation<'a>>,
+    attr_decls: HashMap<&'a str, AttributeDecl<'a>>,
     element_types: Vec<ElementTypeDecl<'a>>,
     current_node_id: usize,
 }
@@ -1137,6 +1177,7 @@ impl Parser {
             prefixes: HashSet::new(),
             entities: HashMap::new(),
             notations: HashMap::new(),
+            attr_decls: HashMap::new(),
             element_types: Vec::new(),
             current_node_id: 0,
         };
@@ -1149,6 +1190,7 @@ impl Parser {
 
         parse_document(&mut stream, &mut ctx)?;
 
+        dbg!(&ctx.attr_decls);
         let options = pretty::Options::default();
         pretty::pretty_print(options, &ctx).unwrap();
 
@@ -1565,17 +1607,29 @@ fn parse_attlist_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -
     stream.advance(9);
     stream.expect_and_consume_whitespace("<!ATTLIST")?;
 
-    let _name = parse_name(stream)?;
+    let element_name = parse_name(stream)?;
     stream.consume_whitespace();
 
+    let mut att_defs = None;
     loop {
+        stream.consume_whitespace();
         match stream.current_byte()? {
             b'>' => break,
-            _ => parse_att_def(stream, ctx)?,
+            _ => {
+                let att_def = parse_att_def(stream, ctx)?;
+                match &mut att_defs {
+                    None => att_defs = Some(vec![att_def]),
+                    Some(att_defs) => att_defs.push(att_def),
+                }
+            }
         }
     }
 
-    stream.advance(1);
+    stream.consume_whitespace();
+    stream.expect_byte(b'>')?;
+
+    let att_decl = AttributeDecl { element_name, att_defs };
+    ctx.attr_decls.insert(element_name, att_decl);
 
     Ok(())
 }
@@ -1590,88 +1644,111 @@ fn parse_attlist_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -
 //                     | 'ENTITIES'
 //                     | 'NMTOKEN'
 //                     | 'NMTOKENS'
-fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<AttributeDef<'a>> {
     stream.consume_whitespace();
-    let _name = parse_name(stream)?;
+    let name = parse_name(stream)?;
     stream.expect_and_consume_whitespace("AttDef name")?;
 
-    if stream.starts_with("CDATA") {
-        stream.advance(5);
-    } else if stream.starts_with("ID") {
-        stream.advance(2);
-    } else if stream.starts_with("IDREF") {
-        stream.advance(5);
-    } else if stream.starts_with("IDREFS") {
-        stream.advance(6);
-    } else if stream.starts_with("ENTITY") {
-        stream.advance(6);
-    } else if stream.starts_with("ENTITIES") {
-        stream.advance(8);
-    } else if stream.starts_with("NMTOKEN") {
-        stream.advance(7);
-    } else if stream.starts_with("NMTOKENS") {
-        stream.advance(8);
-    } else if stream.starts_with("NOTATION") {
-        stream.advance(8);
-        stream.expect_and_consume_whitespace("NOTATION")?;
-        stream.expect_byte(b'(')?;
-        stream.consume_whitespace();
-        let _name = parse_name(stream)?;
-        loop {
+    let att_type = {
+        if stream.starts_with("CDATA") {
+            stream.advance(5);
+            AttType::StringType
+        } else if stream.starts_with("ID") {
+            stream.advance(2);
+            AttType::TokenizedType(TokenizedType::Id)
+        } else if stream.starts_with("IDREF") {
+            stream.advance(5);
+            AttType::TokenizedType(TokenizedType::IdRef)
+        } else if stream.starts_with("IDREFS") {
+            stream.advance(6);
+            AttType::TokenizedType(TokenizedType::IdRefs)
+        } else if stream.starts_with("ENTITY") {
+            stream.advance(6);
+            AttType::TokenizedType(TokenizedType::Entity)
+        } else if stream.starts_with("ENTITIES") {
+            stream.advance(8);
+            AttType::TokenizedType(TokenizedType::Entities)
+        } else if stream.starts_with("NMTOKEN") {
+            stream.advance(7);
+            AttType::TokenizedType(TokenizedType::NmToken)
+        } else if stream.starts_with("NMTOKENS") {
+            stream.advance(8);
+            AttType::TokenizedType(TokenizedType::NmTokens)
+        } else if stream.starts_with("NOTATION") {
+            stream.advance(8);
+            stream.expect_and_consume_whitespace("NOTATION")?;
+            stream.expect_byte(b'(')?;
             stream.consume_whitespace();
-            match stream.current_byte()? {
-                b')' => break,
-                b'|' => {
-                    stream.advance(1);
-                    let _ = parse_name(stream)?;
-                }
-                _ => return Err(ParseError::WTF(stream.span_single())),
-            }
-        }
-    } else if stream.starts_with("(") {
-        stream.advance(1);
-        stream.consume_whitespace();
-        let _nm_token = parse_nm_token(stream)?;
 
-        loop {
-            stream.consume_whitespace();
-            match stream.current_byte()? {
-                b')' => break,
-                b'|' => {
-                    stream.advance(1);
-                    stream.consume_whitespace();
-                    let _nm_tokn = parse_nm_token(stream)?;
+            let name = parse_name(stream)?;
+            let mut names = vec![name];
+
+            loop {
+                stream.consume_whitespace();
+                match stream.current_byte()? {
+                    b')' => break,
+                    b'|' => {
+                        stream.advance(1);
+                        names.push(parse_name(stream)?);
+                    }
+                    _ => return Err(ParseError::WTF(stream.span_single())),
                 }
-                _ => return Err(ParseError::WTF(stream.span_single())),
             }
+            AttType::EnumeratedType(EnumeratedType::NotationType(names))
+        } else if stream.starts_with("(") {
+            stream.advance(1);
+            stream.consume_whitespace();
+
+            let nm_token = parse_nm_token(stream)?;
+            let mut nm_tokens = vec![nm_token];
+
+            loop {
+                stream.consume_whitespace();
+                match stream.current_byte()? {
+                    b')' => break,
+                    b'|' => {
+                        stream.advance(1);
+                        stream.consume_whitespace();
+                        nm_tokens.push(parse_nm_token(stream)?);
+                    }
+                    _ => return Err(ParseError::WTF(stream.span_single())),
+                }
+            }
+            stream.advance(1);
+            AttType::EnumeratedType(EnumeratedType::Enumeration(nm_tokens))
+        } else {
+            return Err(ParseError::WTF(stream.span_single()));
         }
-        stream.advance(1);
-    } else {
-        return Err(ParseError::WTF(stream.span_single()));
-    }
+    };
 
     stream.expect_and_consume_whitespace("AttType")?;
-    parse_default_decl(stream, ctx)?;
+    let default_decl = parse_default_decl(stream, ctx)?;
 
-    Ok(())
+    Ok(AttributeDef {
+        name,
+        att_type,
+        default_decl,
+    })
 }
 
 // DefaultDecl  ::=  '#REQUIRED' | '#IMPLIED' | (('#FIXED' S)? AttValue)
-// [WFC: No External Entity References]
-fn parse_default_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+fn parse_default_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<DefaultDecl<'a>> {
     if stream.starts_with("#REQUIRED") {
         stream.advance(9);
+        Ok(DefaultDecl::Required)
     } else if stream.starts_with("#IMPLIED") {
         stream.advance(8);
+        Ok(DefaultDecl::Implied)
     } else {
+        let mut fixed = false;
         if stream.starts_with("#FIXED") {
+            fixed = true;
             stream.advance(6);
             stream.expect_and_consume_whitespace("FIXED Default Decl")?;
         }
-        let _value = parse_attribute_value(stream, ctx)?;
+        let value = parse_attribute_value(stream, ctx)?;
+        Ok(DefaultDecl::Fixed { fixed, value })
     }
-
-    Ok(())
 }
 
 // NotationDecl  ::=  '<!NOTATION' S Name S (ExternalID | PublicID) S? '>'
@@ -1930,7 +2007,6 @@ fn parse_mixed_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, 
     }
 
     let raw = stream.slice_from(start);
-    dbg!(&raw);
     ctx.element_types.push(ElementTypeDecl {
         name,
         raw: Some(raw),
@@ -2987,6 +3063,7 @@ mod test {
             prefixes: HashSet::new(),
             entities: HashMap::new(),
             notations: HashMap::new(),
+            attr_decls: HashMap::new(),
             element_types: Vec::new(),
             current_node_id: 0,
         }
@@ -3002,6 +3079,7 @@ mod test {
             prefixes: HashSet::new(),
             entities: HashMap::new(),
             notations: HashMap::new(),
+            attr_decls: HashMap::new(),
             element_types: Vec::new(),
             current_node_id: 0,
         }
