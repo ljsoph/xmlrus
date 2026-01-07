@@ -1180,8 +1180,9 @@ impl Parser {
 
         parse_document(&mut stream, &mut ctx)?;
 
-        let options = pretty::Options::default();
-        pretty::pretty_print(options, &ctx).unwrap();
+        pretty::PrettyPrinterBuilder::new(std::io::stdout())
+            .pretty_print(&ctx)
+            .unwrap();
 
         Ok(ctx.doc)
     }
