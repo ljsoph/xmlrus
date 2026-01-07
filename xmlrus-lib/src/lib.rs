@@ -690,10 +690,6 @@ pub enum NodeKind<'a> {
         target: &'a str,
         data: Option<&'a str>,
     },
-    EntityRef {
-        name: &'a str,
-        value: &'a str,
-    },
     Text(&'a str),
     Comment(&'a str),
     CData(&'a str),
@@ -780,9 +776,9 @@ struct AttributeDef<'a> {
 
 #[derive(Clone, Debug, PartialEq)]
 enum AttType<'a> {
-    StringType,
-    TokenizedType(TokenizedType),
-    EnumeratedType(EnumeratedType<'a>),
+    String,
+    Tokenized(TokenizedType),
+    Enumerated(EnumeratedType<'a>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -892,12 +888,6 @@ pub enum Token<'a> {
     /// <![CDATA[ Data that can <data>markup</data> ]]>
     /// ```
     CData { data: &'a str },
-
-    /// ```xml
-    /// <person>hello, &name;!</person>
-    ///                ^^^^^^
-    /// ```
-    EntityRef { name: &'a str, value: &'a str },
 }
 
 pub struct TokenStream<'a> {
@@ -1190,7 +1180,6 @@ impl Parser {
 
         parse_document(&mut stream, &mut ctx)?;
 
-        dbg!(&ctx.attr_decls);
         let options = pretty::Options::default();
         pretty::pretty_print(options, &ctx).unwrap();
 
@@ -1652,28 +1641,28 @@ fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
     let att_type = {
         if stream.starts_with("CDATA") {
             stream.advance(5);
-            AttType::StringType
+            AttType::String
         } else if stream.starts_with("ID") {
             stream.advance(2);
-            AttType::TokenizedType(TokenizedType::Id)
+            AttType::Tokenized(TokenizedType::Id)
         } else if stream.starts_with("IDREF") {
             stream.advance(5);
-            AttType::TokenizedType(TokenizedType::IdRef)
+            AttType::Tokenized(TokenizedType::IdRef)
         } else if stream.starts_with("IDREFS") {
             stream.advance(6);
-            AttType::TokenizedType(TokenizedType::IdRefs)
+            AttType::Tokenized(TokenizedType::IdRefs)
         } else if stream.starts_with("ENTITY") {
             stream.advance(6);
-            AttType::TokenizedType(TokenizedType::Entity)
+            AttType::Tokenized(TokenizedType::Entity)
         } else if stream.starts_with("ENTITIES") {
             stream.advance(8);
-            AttType::TokenizedType(TokenizedType::Entities)
+            AttType::Tokenized(TokenizedType::Entities)
         } else if stream.starts_with("NMTOKEN") {
             stream.advance(7);
-            AttType::TokenizedType(TokenizedType::NmToken)
+            AttType::Tokenized(TokenizedType::NmToken)
         } else if stream.starts_with("NMTOKENS") {
             stream.advance(8);
-            AttType::TokenizedType(TokenizedType::NmTokens)
+            AttType::Tokenized(TokenizedType::NmTokens)
         } else if stream.starts_with("NOTATION") {
             stream.advance(8);
             stream.expect_and_consume_whitespace("NOTATION")?;
@@ -1696,7 +1685,7 @@ fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
                 }
             }
             stream.advance(1);
-            AttType::EnumeratedType(EnumeratedType::NotationType(names))
+            AttType::Enumerated(EnumeratedType::NotationType(names))
         } else if stream.starts_with("(") {
             stream.advance(1);
             stream.consume_whitespace();
@@ -1717,7 +1706,7 @@ fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
                 }
             }
             stream.advance(1);
-            AttType::EnumeratedType(EnumeratedType::Enumeration(nm_tokens))
+            AttType::Enumerated(EnumeratedType::Enumeration(nm_tokens))
         } else {
             return Err(ParseError::WTF(stream.span_single()));
         }
