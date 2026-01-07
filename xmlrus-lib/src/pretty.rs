@@ -14,8 +14,9 @@ where
     W: std::io::Write,
 {
     pub tab_size: Option<usize>,
-    pub dtd: Option<bool>,
-    pub comments: Option<bool>,
+    pub print_dtd: Option<bool>,
+    pub print_comments: Option<bool>,
+    pub print_doc_info: Option<bool>,
     pub writer: std::io::BufWriter<W>,
 }
 
@@ -26,8 +27,9 @@ where
     pub fn new(writer: W) -> Self {
         Self {
             tab_size: None,
-            dtd: None,
-            comments: None,
+            print_dtd: None,
+            print_comments: None,
+            print_doc_info: None,
             writer: std::io::BufWriter::new(writer),
         }
     }
@@ -40,21 +42,28 @@ where
 
     #[allow(unused)]
     pub fn print_dtd(mut self, print_dtd: bool) -> Self {
-        self.dtd = Some(print_dtd);
+        self.print_dtd = Some(print_dtd);
         self
     }
 
     #[allow(unused)]
     pub fn print_comments(mut self, print_comments: bool) -> Self {
-        self.comments = Some(print_comments);
+        self.print_comments = Some(print_comments);
+        self
+    }
+
+    #[allow(unused)]
+    pub fn print_doc_info(mut self, print_doc_info: bool) -> Self {
+        self.print_doc_info = Some(print_doc_info);
         self
     }
 
     pub fn pretty_print(self, ctx: &Context) -> std::io::Result<()> {
         let mut printer = PrettyPrinter {
             tab_size: self.tab_size.unwrap_or(2),
-            dtd: self.dtd.unwrap_or(true),
-            comments: self.comments.unwrap_or(true),
+            print_dtd: self.print_dtd.unwrap_or(true),
+            print_comments: self.print_comments.unwrap_or(true),
+            print_doc_info: self.print_doc_info.unwrap_or(true),
             writer: self.writer,
         };
 
@@ -68,8 +77,9 @@ where
     W: std::io::Write,
 {
     pub tab_size: usize,
-    pub dtd: bool,
-    pub comments: bool,
+    pub print_dtd: bool,
+    pub print_comments: bool,
+    pub print_doc_info: bool,
     pub writer: std::io::BufWriter<W>,
 }
 
@@ -94,20 +104,22 @@ where
             standalone,
         } = first.data
         {
-            indent += self.tab_size;
-            writeln!(self.writer, "{:>indent$}Version: {version}", "")?;
-            if let Some(encoding) = encoding {
-                writeln!(self.writer, "{:>indent$}Encoding: {encoding}", "")?;
-            }
-            if let Some(standalone) = standalone {
-                writeln!(self.writer, "{:>indent$}Standalone: {standalone}", "")?;
-            }
+            if self.print_doc_info {
+                indent += self.tab_size;
+                writeln!(self.writer, "{:>indent$}Version: {version}", "")?;
+                if let Some(encoding) = encoding {
+                    writeln!(self.writer, "{:>indent$}Encoding: {encoding}", "")?;
+                }
+                if let Some(standalone) = standalone {
+                    writeln!(self.writer, "{:>indent$}Standalone: {standalone}", "")?;
+                }
 
-            indent -= self.tab_size;
+                indent -= self.tab_size;
+            }
             has_xml_decl = true;
         }
 
-        if self.dtd {
+        if self.print_dtd {
             self.pp_dtd(&mut indent, ctx)?;
         }
 
@@ -137,7 +149,7 @@ where
             NodeKind::ProcessingInstruction { target, data } => self.pp_pi(indent, target, data)?,
             NodeKind::Text(text) => self.pp_text(indent, text)?,
             NodeKind::Comment(comment) => {
-                if self.comments {
+                if self.print_comments {
                     self.pp_comment(indent, comment)?;
                 }
             }
