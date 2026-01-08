@@ -6,6 +6,7 @@ use crate::Namespace;
 use crate::Node;
 use crate::NodeKind;
 use crate::Notation;
+use crate::QName;
 
 use std::io::Write;
 
@@ -210,7 +211,7 @@ where
     fn pp_element(
         &mut self,
         indent: &mut usize,
-        name: &str,
+        qname: &QName,
         attributes: &Vec<Attribute>,
         namespaces: &Vec<Namespace>,
         children: &Vec<Node>,
@@ -220,7 +221,12 @@ where
     {
         *indent += self.tab_size;
 
-        writeln!(self.writer, "{:>indent$}Element ({})", "", name)?;
+        write!(self.writer, "{:>indent$}Element ", "")?;
+        if let Some(prefix) = qname.prefix {
+            write!(self.writer, "{prefix}:")?;
+        }
+
+        writeln!(self.writer, "{}", qname.local)?;
 
         for namespace in namespaces {
             self.pp_namespace(indent, namespace)?;
@@ -244,11 +250,11 @@ where
         W: std::io::Write,
     {
         *indent += self.tab_size;
-        writeln!(
-            self.writer,
-            "{:>indent$}Attribute {}=\"{}\"",
-            "", attribute.name, attribute.value
-        )?;
+        write!(self.writer, "{:>indent$}Attribute ", "")?;
+        if let Some(prefix) = attribute.qname.prefix {
+            write!(self.writer, "{prefix}:")?;
+        }
+        writeln!(self.writer, "{}=\"{}\"", attribute.qname.local, attribute.value)?;
         *indent -= self.tab_size;
 
         Ok(())
@@ -260,14 +266,12 @@ where
     {
         *indent += self.tab_size;
 
-        write!(self.writer, "{:>indent$}Namespace", "")?;
-
-        if let Some(name) = namespace.name {
-            write!(self.writer, " {name} ")?;
-        }
-
-        write!(self.writer, "uri=\"{}\"", namespace.uri)?;
-        writeln!(self.writer)?;
+        let name = namespace.name.map_or("default", |n| n);
+        writeln!(
+            self.writer,
+            "{:>indent$}Namespace ({}) uri=\"{}\"",
+            "", name, namespace.uri
+        )?;
 
         *indent -= self.tab_size;
 

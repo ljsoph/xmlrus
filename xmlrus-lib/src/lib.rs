@@ -557,7 +557,7 @@ impl<'a> Document<'a> {
 
             for node in nodes {
                 if let NodeKind::Element { name, children, .. } = &node.data {
-                    if *name == tag_name {
+                    if name.local == tag_name {
                         elements.push(node);
                     }
 
@@ -624,15 +624,25 @@ pub enum EntityType<'a> {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QName<'a> {
+    prefix: Option<&'a str>,
+    local: &'a str,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub struct Attribute<'a> {
-    pub name: &'a str,
+    pub qname: QName<'a>,
     pub value: &'a str,
 }
 
 impl std::fmt::Debug for Attribute<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Attribute {{ name: {}, value: {} }}", self.name, self.value)
+        write!(f, "Attribute {{ name: ")?;
+        if let Some(prefix) = self.qname.prefix {
+            write!(f, "{}:", prefix)?;
+        }
+        write!(f, "{}, value: {} }}", self.qname.local, self.value)
     }
 }
 
@@ -681,7 +691,7 @@ pub enum NodeKind<'a> {
         standalone: Option<&'a str>,
     },
     Element {
-        name: &'a str,
+        name: QName<'a>,
         attributes: Vec<Attribute<'a>>,
         namespaces: Vec<Namespace<'a>>,
         children: Vec<Node<'a>>,
@@ -1181,6 +1191,9 @@ impl Parser {
         parse_document(&mut stream, &mut ctx)?;
 
         pretty::PrettyPrinterBuilder::new(std::io::stdout())
+            .print_dtd(false)
+            .print_comments(false)
+            .print_doc_info(false)
             .pretty_print(&ctx)
             .unwrap();
 
@@ -2180,15 +2193,15 @@ fn parse_element<'a>(
     let mut children = vec![];
 
     let start_pos = stream.pos;
-    let (start_prefix, start_local) = parse_element_start(stream, ctx)?;
+    let start_qname = parse_element_start(stream, ctx)?;
 
     if let Some(doc_name) = ctx.doc.name
         && let ElementType::Root = kind
-        && doc_name != start_local
+        && doc_name != start_qname.local
     {
         return Err(ParseError::InvalidRootName(
             doc_name.to_string(),
-            start_local.to_string(),
+            start_qname.local.to_string(),
             stream.span_from(start_pos + 1),
         ));
     }
@@ -2209,7 +2222,7 @@ fn parse_element<'a>(
                     id,
                     parent,
                     NodeKind::Element {
-                        name: start_local,
+                        name: start_qname,
                         namespaces,
                         attributes,
                         children,
@@ -2228,7 +2241,8 @@ fn parse_element<'a>(
                 stream.consume_whitespace();
 
                 let start = stream.pos;
-                let (prefix, local, value) = parse_attribute(stream, ctx)?;
+                let (qname, value) = parse_attribute(stream, ctx)?;
+                let QName { prefix, local } = qname;
                 match prefix {
                     // prefixed namespace - 'xmlns:prefix="foobarbaz"'
                     Some(prefix) if prefix == XMLNS_PREFIX => {
@@ -2279,7 +2293,7 @@ fn parse_element<'a>(
                             return Err(ParseError::UnknownPrefix(prefix.to_string(), stream.span_from(start)));
                         }
 
-                        if attributes.iter().any(|a: &Attribute| a.name == local) {
+                        if attributes.iter().any(|a: &Attribute| a.qname.local == local) {
                             let start = stream.pos - local.len() - value.len() - 3;
                             return Err(ParseError::DuplicateAttribute(
                                 local.to_string(),
@@ -2287,11 +2301,11 @@ fn parse_element<'a>(
                             ));
                         }
 
-                        attributes.push(Attribute { name: local, value });
+                        attributes.push(Attribute { qname, value });
                     }
                     // Unprefixed Attribute
                     None => {
-                        if attributes.iter().any(|a: &Attribute| a.name == local) {
+                        if attributes.iter().any(|a: &Attribute| a.qname.local == local) {
                             let start = stream.pos - local.len() - value.len() - 3;
                             return Err(ParseError::DuplicateAttribute(
                                 local.to_string(),
@@ -2299,7 +2313,7 @@ fn parse_element<'a>(
                             ));
                         }
 
-                        attributes.push(Attribute { name: local, value });
+                        attributes.push(Attribute { qname, value });
                     }
                 }
             }
@@ -2312,11 +2326,14 @@ fn parse_element<'a>(
     }
     ctx.prefixes = prefixes;
 
-    let (end_prefix, end_local) = parse_element_end(stream, ctx)?;
-    if start_prefix != end_prefix || start_local != end_local {
-        let (expected, actual) = match start_prefix {
-            Some(prefix) => (format!("{}:{}", prefix, start_local), format!("{prefix}:{end_local}")),
-            None => (start_local.to_string(), end_local.to_string()),
+    let end_qname = parse_element_end(stream, ctx)?;
+    if start_qname.prefix != end_qname.prefix || start_qname.local != end_qname.local {
+        let (expected, actual) = match start_qname.prefix {
+            Some(prefix) => (
+                format!("{}:{}", prefix, start_qname.local),
+                format!("{}:{}", prefix, end_qname.local),
+            ),
+            None => (start_qname.local.to_string(), end_qname.local.to_string()),
         };
         let start = stream.pos - actual.len() - 1;
         let span = stream.span(start, stream.pos - 1);
@@ -2332,7 +2349,7 @@ fn parse_element<'a>(
         id,
         parent,
         NodeKind::Element {
-            name: start_local,
+            name: start_qname,
             namespaces,
             attributes,
             children,
@@ -2344,10 +2361,7 @@ fn parse_element<'a>(
 
 // STag ::= '<' QName (S Attribute)* S? '>'
 //          ^^^^^^^^^
-fn parse_element_start<'a>(
-    stream: &mut TokenStream<'a>,
-    ctx: &mut Context<'a>,
-) -> ParseResult<(Option<&'a str>, &'a str)> {
+fn parse_element_start<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<QName<'a>> {
     let start = stream.pos;
     stream.advance(1);
 
@@ -2355,30 +2369,27 @@ fn parse_element_start<'a>(
         return Err(ParseError::InvalidXmlName(stream.span_single()));
     }
 
-    let (prefix, local) = parse_qname(stream, ctx)?;
+    let qname = parse_qname(stream, ctx)?;
 
-    if let Some(prefix) = prefix
+    if let Some(prefix) = qname.prefix
         && prefix == XMLNS_PREFIX
     {
         return Err(ParseError::ReservedPrefix(stream.span_from(start)));
     }
 
-    Ok((prefix, local))
+    Ok(qname)
 }
 
 // Attribute  ::=  NSAttName Eq AttValue | QName Eq AttValue
 // AttValue   ::=  '"' ([^<&"] | Reference)* '"'
 //              |  "'" ([^<&'] | Reference)* "'"
-fn parse_attribute<'a>(
-    stream: &mut TokenStream<'a>,
-    ctx: &mut Context<'a>,
-) -> ParseResult<(Option<&'a str>, &'a str, &'a str)> {
-    let (prefix, local) = parse_qname(stream, ctx)?;
+fn parse_attribute<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<(QName<'a>, &'a str)> {
+    let qname = parse_qname(stream, ctx)?;
     stream.consume_whitespace();
     stream.expect_byte(b'=')?;
     stream.consume_whitespace();
     let value = parse_attribute_value(stream, ctx)?;
-    Ok((prefix, local, value))
+    Ok((qname, value))
 }
 
 enum StrSlice<'a> {
@@ -2580,22 +2591,19 @@ fn expand_entity_ref<'a>(
 }
 
 // ETag  ::=  '</' QName S? '>'
-fn parse_element_end<'a>(
-    stream: &mut TokenStream<'a>,
-    ctx: &mut Context<'a>,
-) -> ParseResult<(Option<&'a str>, &'a str)> {
+fn parse_element_end<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<QName<'a>> {
     stream.advance(2);
 
     if stream.is_white_space()? {
         return Err(ParseError::InvalidXmlName(stream.span_single()));
     }
 
-    let (prefix, local) = parse_qname(stream, ctx)?;
+    let qname = parse_qname(stream, ctx)?;
 
     stream.consume_whitespace();
     stream.expect_byte(b'>')?;
 
-    Ok((prefix, local))
+    Ok(qname)
 }
 
 // QName           ::=  PrefixedName | UnprefixedName
@@ -2604,7 +2612,7 @@ fn parse_element_end<'a>(
 // Prefix          ::=  NCName
 // LocalPart       ::=  NCName
 // NCName          ::=  Name - (Char* ':' Char*) /* An XML Name, minus the ":" */
-fn parse_qname<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<(Option<&'a str>, &'a str)> {
+fn parse_qname<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<QName<'a>> {
     let start = stream.pos;
     let local = parse_nc_name(stream)?;
 
@@ -2612,7 +2620,7 @@ fn parse_qname<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Parse
         if local.is_empty() {
             return Err(ParseError::InvalidXmlName(stream.span_single()));
         }
-        return Ok((None, local));
+        return Ok(QName { prefix: None, local });
     }
 
     let prefix = local;
@@ -2632,7 +2640,10 @@ fn parse_qname<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Parse
         return Err(ParseError::InvalidXmlName(stream.span_single()));
     }
 
-    Ok((Some(prefix), local))
+    return Ok(QName {
+        prefix: Some(prefix),
+        local,
+    });
 }
 
 // content  ::=  CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
