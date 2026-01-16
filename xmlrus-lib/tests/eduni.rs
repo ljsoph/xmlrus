@@ -1,5 +1,5 @@
 mod eduni_namespaces {
-    fn test(test_num: &str) -> Result<(), xmlrus::ParseError> {
+    fn test(test_num: &str) -> Result<(), xmlrus::error::Error> {
         xmlrus::Parser::parse(format!("tests/eduni/namespaces/1.0/{test_num}.xml"))
     }
 

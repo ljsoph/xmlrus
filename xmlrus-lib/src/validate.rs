@@ -1,4 +1,6 @@
-use crate::{ParseError, ParseResult, TokenStream};
+use crate::ParseResult;
+use crate::error::Error;
+use crate::error::SyntaxError;
 
 // NameStartChar ::=   ":" | [A-Z] | "_" | [a-z] | [#xC0-#xD6] | [#xD8-#xF6] | [#xF8-#x2FF] | [#x370-#x37D]
 //                    | [#x37F-#x1FFF] | [#x200C-#x200D] | [#x2070-#x218F] | [#x2C00-#x2FEF] | [#x3001-#xD7FF] | [#xF900-#xFDCF] | [#xFDF0-#xFFFD] | [#x10000-#xEFFFF]
@@ -7,24 +9,19 @@ use crate::{ParseError, ParseResult, TokenStream};
 // Names         ::=   Name (#x20 Name)*
 // Nmtoken       ::=   (NameChar)+
 // Nmtokens      ::=   Nmtoken (#x20 Nmtoken)*
-pub fn is_valid_name(name: &str, start: usize, token_stream: &mut TokenStream) -> ParseResult<()> {
+pub fn is_valid_name(name: &str) -> ParseResult<()> {
     let mut chars = name.char_indices();
 
     // The first character of a Name MUST be a NameStartChar, and any other characters MUST be NameChars;
-    if let Some((index, first_char)) = chars.next()
+    if let Some((_, first_char)) = chars.next()
         && !is_name_start_char(first_char)
     {
-        let start = start + index;
-        return Err(ParseError::InvalidXmlChar(
-            first_char,
-            token_stream.span(start, start + 1),
-        ));
+        return Err(Error::syntax(SyntaxError::InvalidXmlChar { c: first_char }));
     }
 
-    for (index, value) in chars {
+    for (_, value) in chars {
         if !is_name_char(value) {
-            let start = start + index;
-            return Err(ParseError::InvalidXmlChar(value, token_stream.span(start, start + 1)));
+            return Err(Error::syntax(SyntaxError::InvalidXmlChar { c: value }));
         }
     }
 
@@ -90,11 +87,10 @@ pub fn is_xml_char(value: char) -> bool {
 }
 
 /// Validate a String contains only characters in the XML Character Range
-pub fn is_xml_chars(seq: &str, start: usize, token_stream: &mut TokenStream) -> ParseResult<()> {
-    for (index, value) in seq.char_indices() {
+pub fn is_xml_chars(seq: &str) -> ParseResult<()> {
+    for (_, value) in seq.char_indices() {
         if !is_xml_char(value) {
-            let start = start + index;
-            return Err(ParseError::InvalidXmlChar(value, token_stream.span(start, start + 1)));
+            return Err(Error::syntax(SyntaxError::InvalidXmlChar { c: value }));
         }
     }
 
