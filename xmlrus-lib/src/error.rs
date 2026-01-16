@@ -231,7 +231,7 @@ impl Display for SyntaxError {
         match self {
             Self::DuplicateAttribute { name } => writeln!(f, "duplicate attribute '{name}'"),
             Self::ElementNameMismatch { expected, actual } => {
-                writeln!(f, "mismatched tag: expected '{expected}, actual '{actual}")
+                writeln!(f, "mismatched start and end tag: expected '{expected}' got '{actual}'")
             }
             Self::ExternalEntityRefInAttribute { ref_ } => writeln!(f, "attribute '{ref_}' refrecnes external entity"),
             Self::IllegalUnparsedEntity { ref_ } => writeln!(f, "unparsed entity '{ref_}' outside of attribute value"),
@@ -245,7 +245,7 @@ impl Display for SyntaxError {
                 "invalid comment: double-hyphens (--) are not allowed inside comments"
             ),
             Self::InvalidElementContentSeparator { expected, actual } => {
-                writeln!(f, "invalid content separator: expected '{expected}, actual '{actual}")
+                writeln!(f, "invalid content separator: expected '{expected}' got '{actual}'")
             }
             Self::InvalidEncodingName => writeln!(f, "invalid encoding"),
             Self::InvalidNmToken => writeln!(f, "invalid NmToken"),
@@ -269,7 +269,7 @@ impl Display for SyntaxError {
             Self::UnescapedLTInAttrValue => writeln!(f, "unescaped '<' in attribute value"),
             Self::UnexpectedDeclaration => writeln!(f, "unexpected XML declaration"),
             Self::UnexpectedCharacter { expected, actual } => {
-                writeln!(f, "unexpected character: expected '{expected}', actual '{actual}'")
+                writeln!(f, "unexpected character: expected '{expected}' got '{actual}'")
             }
             Self::UnexpectedElement => writeln!(f, "unexpected element"),
             Self::UnexpectedXmlUri => writeln!(f, "unexpected XML URI"),
@@ -324,7 +324,7 @@ impl Display for ValidationError {
             }
             ValidationError::DuplicateNotation { name } => writeln!(f, "duplicate notation declaration '{name}'"),
             ValidationError::InvalidRootElementType { expected, actual } => {
-                writeln!(f, "invalid root element name: expected '{expected}', actual '{actual}'")
+                writeln!(f, "invalid root element name: expected '{expected}' got '{actual}'")
             }
             ValidationError::StandaloneDocument => writeln!(f, "standlone document TODO"),
             ValidationError::UnknownEntityReference { ref_ } => writeln!(f, "unknown entity reference '{ref_}"),
