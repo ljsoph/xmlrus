@@ -16,7 +16,7 @@ fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
 
     if let Err(err) = xmlrus::Parser::parse(cli.file) {
-        eprintln!("{err}");
+        eprintln!("{}", err.diagnostic());
         std::process::exit(1);
     }
 

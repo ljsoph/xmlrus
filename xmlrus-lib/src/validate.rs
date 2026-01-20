@@ -1,5 +1,6 @@
 use crate::ParseResult;
-use crate::error::Error;
+use crate::TokenStream;
+use crate::error;
 use crate::error::SyntaxError;
 
 // NameStartChar ::=   ":" | [A-Z] | "_" | [a-z] | [#xC0-#xD6] | [#xD8-#xF6] | [#xF8-#x2FF] | [#x370-#x37D]
@@ -9,19 +10,19 @@ use crate::error::SyntaxError;
 // Names         ::=   Name (#x20 Name)*
 // Nmtoken       ::=   (NameChar)+
 // Nmtokens      ::=   Nmtoken (#x20 Nmtoken)*
-pub fn is_valid_name(name: &str) -> ParseResult<()> {
+pub fn is_valid_name(stream: &TokenStream, name: &str) -> ParseResult<()> {
     let mut chars = name.char_indices();
 
     // The first character of a Name MUST be a NameStartChar, and any other characters MUST be NameChars;
     if let Some((_, first_char)) = chars.next()
         && !is_name_start_char(first_char)
     {
-        return Err(Error::syntax(SyntaxError::InvalidXmlChar { c: first_char }));
+        return Err(error::syntax(SyntaxError::InvalidXmlChar { c: first_char }, stream));
     }
 
     for (_, value) in chars {
         if !is_name_char(value) {
-            return Err(Error::syntax(SyntaxError::InvalidXmlChar { c: value }));
+            return Err(error::syntax(SyntaxError::InvalidXmlChar { c: value }, stream));
         }
     }
 
@@ -87,10 +88,10 @@ pub fn is_xml_char(value: char) -> bool {
 }
 
 /// Validate a String contains only characters in the XML Character Range
-pub fn is_xml_chars(seq: &str) -> ParseResult<()> {
+pub fn is_xml_chars(stream: &TokenStream, seq: &str) -> ParseResult<()> {
     for (_, value) in seq.char_indices() {
         if !is_xml_char(value) {
-            return Err(Error::syntax(SyntaxError::InvalidXmlChar { c: value }));
+            return Err(error::syntax(SyntaxError::InvalidXmlChar { c: value }, stream));
         }
     }
 

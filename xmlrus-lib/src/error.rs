@@ -2,11 +2,54 @@ use std::fmt::Display;
 
 pub type ParseResult<T> = std::result::Result<T, Error>;
 
+pub(crate) fn io(err: std::io::Error) -> Error {
+    Error::new(ErrorKind::Io(err), TextPos { row: 0, col: 0 })
+}
+
+pub(crate) fn syntax(err: SyntaxError, stream: &crate::TokenStream) -> Error {
+    Error::new(ErrorKind::Syntax(err), TextPos::new(stream))
+}
+
+pub(crate) fn validation(err: ValidationError, stream: &crate::TokenStream) -> Error {
+    Error::new(ErrorKind::Invalid(err), TextPos::new(stream))
+}
+
+pub(crate) fn eof() -> Error {
+    Error::new(ErrorKind::Eof, TextPos { row: 0, col: 0 })
+}
+
+#[derive(Debug)]
+struct TextPos {
+    row: usize,
+    col: usize,
+}
+
+impl TextPos {
+    fn new(stream: &crate::TokenStream) -> Self {
+        let mut row = 1;
+        let mut col = 1;
+
+        for (pos, c) in stream.source.char_indices() {
+            if pos == stream.pos {
+                break;
+            }
+
+            if c == '\n' {
+                row += 1;
+                col = 1;
+            } else {
+                col += c.len_utf8()
+            }
+        }
+
+        Self { row, col }
+    }
+}
+
 #[derive(Debug)]
 pub struct Error {
     pub kind: ErrorKind,
-    row: usize,
-    col: usize,
+    pos: TextPos,
 }
 
 impl std::error::Error for Error {
@@ -20,34 +63,17 @@ impl std::error::Error for Error {
 
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.kind {
-            ErrorKind::Io(_) | ErrorKind::Syntax(_) | ErrorKind::Invalid(_) => {
-                write!(f, "{}:{}: {}", self.row, self.col, self.kind)
-            }
-            ErrorKind::Eof => writeln!(f, "{}", self.kind),
-        }
+        writeln!(f, "{}", self.kind)
     }
 }
 
 impl Error {
-    pub(crate) fn new(kind: ErrorKind, row: usize, col: usize) -> Self {
-        Self { kind, row, col }
+    fn new(kind: ErrorKind, pos: TextPos) -> Self {
+        Self { kind, pos }
     }
 
-    pub(crate) fn io(io_error: std::io::Error) -> Self {
-        Self::new(ErrorKind::Io(io_error), 0, 0)
-    }
-
-    pub(crate) fn syntax(syntax_error: SyntaxError) -> Self {
-        Self::new(ErrorKind::Syntax(syntax_error), 0, 0)
-    }
-
-    pub(crate) fn validation(validation_error: ValidationError) -> Self {
-        Self::new(ErrorKind::Invalid(validation_error), 0, 0)
-    }
-
-    pub(crate) fn eof() -> Self {
-        Self::new(ErrorKind::Eof, 0, 0)
+    pub fn diagnostic(&self) -> String {
+        format!("{}:{}: error: {}", self.pos.row, self.pos.col, self.kind)
     }
 }
 

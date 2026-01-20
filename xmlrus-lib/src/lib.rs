@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
+use std::path::PathBuf;
 use std::str::FromStr;
 
-use error::Error;
 use error::ParseResult;
 use error::SyntaxError;
 use error::ValidationError;
@@ -381,6 +381,13 @@ pub struct TokenStream<'a> {
 }
 
 impl<'a> TokenStream<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            pos: 0,
+            len: source.len(),
+        }
+    }
     fn advance(&mut self, amount: usize) {
         self.pos += amount;
     }
@@ -391,7 +398,7 @@ impl<'a> TokenStream<'a> {
 
     fn current_byte(&mut self) -> ParseResult<u8> {
         if self.is_at_end() {
-            return Err(Error::eof());
+            return Err(error::eof());
         }
 
         Ok(self.source.as_bytes()[self.pos])
@@ -412,7 +419,7 @@ impl<'a> TokenStream<'a> {
         };
 
         if self.pos + len > self.len {
-            return Err(Error::eof());
+            return Err(error::eof());
         }
 
         let pos = self.pos;
@@ -437,7 +444,7 @@ impl<'a> TokenStream<'a> {
         }
 
         // Who needs validation
-        char::from_u32(res).ok_or(Error::syntax(SyntaxError::InvalidChar { value: res }))
+        char::from_u32(res).ok_or(error::syntax(SyntaxError::InvalidChar { value: res }, self))
     }
 
     fn unchecked_current_byte(&mut self) -> u8 {
@@ -493,19 +500,6 @@ impl<'a> TokenStream<'a> {
         &self.source[start..self.pos]
     }
 
-    // TODO: What do do with you?
-    // fn span(&self, start: usize, end: usize) -> Span {
-    //     Span::new(self.source, start, end)
-    // }
-    //
-    // fn span_from(&self, start: usize) -> Span {
-    //     Span::new(self.source, start, self.pos)
-    // }
-    //
-    // fn span_single(&self) -> Span {
-    //     Span::new(self.source, self.pos, self.pos + 1)
-    // }
-
     fn is_white_space(&mut self) -> ParseResult<bool> {
         let current = self.current_byte()?;
         Ok(matches!(current, 0x20 | 0x9 | 0xD | 0xA))
@@ -520,7 +514,7 @@ impl<'a> TokenStream<'a> {
 
     fn expect_and_consume_whitespace(&mut self, at: &'static str) -> ParseResult<()> {
         if !self.is_white_space()? {
-            return Err(Error::syntax(SyntaxError::MissingRequiredWhitespace { at }));
+            return Err(error::syntax(SyntaxError::MissingRequiredWhitespace { at }, self));
         }
 
         self.consume_whitespace();
@@ -531,10 +525,13 @@ impl<'a> TokenStream<'a> {
     fn expect_byte(&mut self, c: u8) -> ParseResult<()> {
         let current = self.current_byte()?;
         if current != c {
-            return Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-                expected: (c as char).into(),
-                actual: current as char,
-            }));
+            return Err(error::syntax(
+                SyntaxError::UnexpectedCharacter {
+                    expected: (c as char).into(),
+                    actual: current as char,
+                },
+                self,
+            ));
         }
 
         self.advance(1);
@@ -562,14 +559,19 @@ impl<'a> TokenStream<'a> {
             return Ok(current);
         }
 
-        Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-            expected: "a quote".into(),
-            actual: current as char,
-        }))
+        Err(error::syntax(
+            SyntaxError::UnexpectedCharacter {
+                expected: "a quote".into(),
+                actual: current as char,
+            },
+            self,
+        ))
     }
 }
 
+#[derive(Default)]
 pub struct Context<'a> {
+    path: Option<PathBuf>,
     doc: Document<'a>,
     prefixes: HashSet<&'a str>,
     entities: HashMap<&'a str, Entity<'a>>,
@@ -580,6 +582,12 @@ pub struct Context<'a> {
 }
 
 impl<'a> Context<'a> {
+    fn new(path: Option<PathBuf>) -> Self {
+        Self {
+            path,
+            ..Default::default()
+        }
+    }
     fn current_id(&mut self) -> usize {
         let current = self.current_node_id;
         self.current_node_id += 1;
@@ -598,20 +606,18 @@ impl<'a> Context<'a> {
         self.doc.nodes.push(node)
     }
 
-    fn get_entity(&mut self, name: &'a str) -> ParseResult<&Entity<'a>> {
-        self.entities
-            .get(name)
-            .ok_or(Error::validation(ValidationError::UnknownEntityReference {
-                ref_: name.to_string(),
-            }))
+    fn get_entity(&mut self, stream: &TokenStream<'a>, name: &'a str) -> ParseResult<&Entity<'a>> {
+        self.entities.get(name).ok_or(error::validation(
+            ValidationError::UnknownEntityReference { ref_: name.to_string() },
+            stream,
+        ))
     }
 
-    fn get_entity_mut(&mut self, name: &'a str) -> ParseResult<&mut Entity<'a>> {
-        self.entities
-            .get_mut(name)
-            .ok_or(Error::validation(ValidationError::UnknownEntityReference {
-                ref_: name.to_string(),
-            }))
+    fn get_entity_mut(&mut self, stream: &TokenStream<'a>, name: &'a str) -> ParseResult<&mut Entity<'a>> {
+        self.entities.get_mut(name).ok_or(error::validation(
+            ValidationError::UnknownEntityReference { ref_: name.to_string() },
+            stream,
+        ))
     }
 }
 
@@ -628,40 +634,23 @@ impl Parser {
     where
         P: AsRef<Path>,
     {
+        let path = source.as_ref().to_path_buf();
         let source = match std::fs::read_to_string(source) {
             Ok(source) => source,
-            Err(io_error) => return Err(Error::io(io_error)),
+            Err(io_error) => return Err(error::io(io_error)),
         };
 
-        let _doc = Self::parse_from_str(&source)?;
+        let mut ctx = Context::new(Some(path));
+        let mut stream = TokenStream::new(&source);
 
-        // dbg!(_doc);
+        parse_document(&mut stream, &mut ctx)?;
 
         Ok(())
     }
 
     pub fn parse_from_str(source: &str) -> ParseResult<Document<'_>> {
-        let doc = Document {
-            name: None,
-            root_node_id: None,
-            nodes: Vec::new(),
-        };
-
-        let mut ctx = Context {
-            doc,
-            prefixes: HashSet::new(),
-            entities: HashMap::new(),
-            notations: HashMap::new(),
-            attr_decls: HashMap::new(),
-            element_types: Vec::new(),
-            current_node_id: 0,
-        };
-
-        let mut stream = TokenStream {
-            source,
-            len: source.len(),
-            pos: 0,
-        };
+        let mut ctx = Context::default();
+        let mut stream = TokenStream::new(source);
 
         parse_document(&mut stream, &mut ctx)?;
 
@@ -700,10 +689,13 @@ fn parse_document<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
             // Start of the root node, break and parse outside of the loop.
             b'<' => break,
             c => {
-                return Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-                    expected: "<".into(),
-                    actual: c as char,
-                }));
+                return Err(error::syntax(
+                    SyntaxError::UnexpectedCharacter {
+                        expected: "<".into(),
+                        actual: c as char,
+                    },
+                    stream,
+                ));
             }
         }
     }
@@ -711,7 +703,7 @@ fn parse_document<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
     stream.consume_whitespace();
 
     if stream.is_at_end() {
-        return Err(Error::syntax(SyntaxError::MissingRoot));
+        return Err(error::syntax(SyntaxError::MissingRoot, stream));
     }
 
     let root = parse_element(stream, ctx, ElementType::Root, None)?;
@@ -721,7 +713,7 @@ fn parse_document<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
     parse_misc(stream, ctx)?;
 
     if !stream.is_at_end() {
-        return Err(Error::syntax(SyntaxError::UnexpectedElement));
+        return Err(error::syntax(SyntaxError::UnexpectedElement, stream));
     }
 
     Ok(())
@@ -732,7 +724,7 @@ fn parse_name<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
 
     let current = stream.current_char()?;
     if !validate::is_name_start_char(current) {
-        return Err(Error::syntax(SyntaxError::InvalidXmlChar { c: current }));
+        return Err(error::syntax(SyntaxError::InvalidXmlChar { c: current }, stream));
     }
 
     stream.advance(current.len_utf8());
@@ -746,7 +738,7 @@ fn parse_name<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
     }
 
     let name = stream.slice_from(start);
-    validate::is_valid_name(name)?;
+    validate::is_valid_name(stream, name)?;
 
     Ok(name)
 }
@@ -756,7 +748,7 @@ fn parse_nc_name<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
 
     let current = stream.current_char()?;
     if !validate::is_name_start_char(current) || current == ':' {
-        return Err(Error::syntax(SyntaxError::InvalidXmlChar { c: current }));
+        return Err(error::syntax(SyntaxError::InvalidXmlChar { c: current }, stream));
     }
     stream.advance(current.len_utf8());
 
@@ -769,7 +761,7 @@ fn parse_nc_name<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
     }
 
     let name = stream.slice_from(start);
-    validate::is_valid_name(name)?;
+    validate::is_valid_name(stream, name)?;
 
     Ok(name)
 }
@@ -787,7 +779,7 @@ fn parse_nm_token<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
 
     let nm_token = stream.slice_from(start);
     if nm_token.is_empty() {
-        return Err(Error::syntax(SyntaxError::InvalidNmToken));
+        return Err(error::syntax(SyntaxError::InvalidNmToken, stream));
     }
 
     Ok(nm_token)
@@ -843,7 +835,7 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
     stream.expect_and_consume_whitespace("<?xml")?;
 
     if !stream.peek_seq("version") {
-        return Err(Error::syntax(SyntaxError::MissingVersion));
+        return Err(error::syntax(SyntaxError::MissingVersion, stream));
     }
 
     stream.advance(7);
@@ -854,9 +846,12 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
     let version = {
         let delimiter = stream.consume_quote()?;
         if !stream.starts_with("1.") {
-            return Err(Error::syntax(SyntaxError::InvalidVersion {
-                version: "version must be 1.x".into(),
-            }));
+            return Err(error::syntax(
+                SyntaxError::InvalidVersion {
+                    version: "version must be 1.x".into(),
+                },
+                stream,
+            ));
         }
 
         let start = stream.pos;
@@ -867,7 +862,7 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
                 c if c.is_ascii_digit() => stream.advance(1),
                 _ => {
                     let version = stream.slice_from(start).into();
-                    return Err(Error::syntax(SyntaxError::InvalidVersion { version }));
+                    return Err(error::syntax(SyntaxError::InvalidVersion { version }, stream));
                 }
             }
         }
@@ -879,9 +874,10 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
     stream.consume_whitespace();
     let encoding = if stream.starts_with("encoding") {
         if !stream.has_preceeding_whitespace() {
-            return Err(Error::syntax(SyntaxError::MissingRequiredWhitespace {
-                at: "before encoding",
-            }));
+            return Err(error::syntax(
+                SyntaxError::MissingRequiredWhitespace { at: "before encoding" },
+                stream,
+            ));
         }
         stream.advance(8);
         stream.expect_byte(b'=')?;
@@ -890,7 +886,7 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
         let start = stream.pos;
 
         if !stream.current_byte()?.is_ascii_alphabetic() {
-            return Err(Error::syntax(SyntaxError::InvalidEncodingName));
+            return Err(error::syntax(SyntaxError::InvalidEncodingName, stream));
         }
 
         stream.advance(1);
@@ -914,9 +910,12 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
     stream.consume_whitespace();
     let standalone = if stream.peek_seq("standalone") {
         if !stream.has_preceeding_whitespace() {
-            return Err(Error::syntax(SyntaxError::MissingRequiredWhitespace {
-                at: "before standalone",
-            }));
+            return Err(error::syntax(
+                SyntaxError::MissingRequiredWhitespace {
+                    at: "before standalone",
+                },
+                stream,
+            ));
         }
 
         stream.advance(10);
@@ -926,7 +925,10 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
         if value == "yes" || value == "no" {
             Some(value)
         } else {
-            return Err(Error::syntax(SyntaxError::InvalidStandlone { value: value.into() }));
+            return Err(error::syntax(
+                SyntaxError::InvalidStandlone { value: value.into() },
+                stream,
+            ));
         }
     } else {
         None
@@ -937,7 +939,7 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Pa
     // the incorrect source line.
     stream.consume_whitespace();
     if !stream.peek_seq("?>") {
-        return Err(Error::syntax(SyntaxError::UnclosedDeclaration));
+        return Err(error::syntax(SyntaxError::UnclosedDeclaration, stream));
     }
 
     stream.advance(2);
@@ -969,7 +971,7 @@ fn parse_processing_instruction<'a>(
         && let Some(b'l' | b'L') = stream.peek_byte_at(2)
         && let Some(b' ' | b'\t' | b'\r' | b'\n') = stream.peek_byte_at(3)
     {
-        return Err(Error::syntax(SyntaxError::UnexpectedDeclaration));
+        return Err(error::syntax(SyntaxError::UnexpectedDeclaration, stream));
     }
 
     let target = parse_name(stream)?;
@@ -983,12 +985,15 @@ fn parse_processing_instruction<'a>(
                 return Ok(pi);
             }
             Some(c) => {
-                return Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-                    expected: '>'.into(),
-                    actual: c as char,
-                }));
+                return Err(error::syntax(
+                    SyntaxError::UnexpectedCharacter {
+                        expected: '>'.into(),
+                        actual: c as char,
+                    },
+                    stream,
+                ));
             }
-            None => return Err(Error::eof()),
+            None => return Err(error::eof()),
         }
     }
 
@@ -996,7 +1001,7 @@ fn parse_processing_instruction<'a>(
     let data_start = stream.pos;
     loop {
         if stream.is_at_end() {
-            return Err(Error::eof());
+            return Err(error::eof());
         }
 
         if let Ok(b'?') = stream.current_byte()
@@ -1009,7 +1014,7 @@ fn parse_processing_instruction<'a>(
     }
 
     let data = stream.slice(data_start, stream.pos);
-    validate::is_xml_chars(data)?;
+    validate::is_xml_chars(stream, data)?;
     stream.advance(2);
 
     let id = ctx.current_id();
@@ -1066,10 +1071,13 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
                 }
                 _ if stream.is_white_space()? => stream.advance(1),
                 b => {
-                    return Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-                        expected: "'<' or ' '".into(),
-                        actual: b as char,
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::UnexpectedCharacter {
+                            expected: "'<' or ' '".into(),
+                            actual: b as char,
+                        },
+                        stream,
+                    ));
                 }
             }
         }
@@ -1174,10 +1182,13 @@ fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
                         names.push(parse_name(stream)?);
                     }
                     sep => {
-                        return Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-                            expected: "'|' or ')'".into(),
-                            actual: sep as char,
-                        }));
+                        return Err(error::syntax(
+                            SyntaxError::UnexpectedCharacter {
+                                expected: "'|' or ')'".into(),
+                                actual: sep as char,
+                            },
+                            stream,
+                        ));
                     }
                 }
             }
@@ -1200,17 +1211,20 @@ fn parse_att_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Par
                         nm_tokens.push(parse_nm_token(stream)?);
                     }
                     sep => {
-                        return Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-                            expected: "'|' or ')'".into(),
-                            actual: sep as char,
-                        }));
+                        return Err(error::syntax(
+                            SyntaxError::UnexpectedCharacter {
+                                expected: "'|' or ')'".into(),
+                                actual: sep as char,
+                            },
+                            stream,
+                        ));
                     }
                 }
             }
             stream.advance(1);
             AttType::Enumerated(EnumeratedType::Enumeration(nm_tokens))
         } else {
-            return Err(Error::syntax(SyntaxError::InvalidAttributeType));
+            return Err(error::syntax(SyntaxError::InvalidAttributeType, stream));
         }
     };
 
@@ -1254,9 +1268,10 @@ fn parse_notation_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
 
     let name = parse_name(stream)?;
     if ctx.notations.contains_key(name) {
-        return Err(Error::validation(ValidationError::DuplicateNotation {
-            name: name.into(),
-        }));
+        return Err(error::validation(
+            ValidationError::DuplicateNotation { name: name.into() },
+            stream,
+        ));
     }
 
     stream.expect_and_consume_whitespace("notation name")?;
@@ -1285,9 +1300,12 @@ fn parse_notation_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
         let system_id = match stream.current_byte()? {
             b'\'' | b'"' => {
                 if !stream.has_preceeding_whitespace() {
-                    return Err(Error::syntax(SyntaxError::MissingRequiredWhitespace {
-                        at: "before public id literal",
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::MissingRequiredWhitespace {
+                            at: "before public id literal",
+                        },
+                        stream,
+                    ));
                 }
 
                 Some(parse_system_literal(stream)?)
@@ -1303,9 +1321,12 @@ fn parse_notation_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
             },
         );
     } else {
-        return Err(Error::syntax(SyntaxError::InvalidNotationDecl {
-            reason: "missing ExternalId or PublicId",
-        }));
+        return Err(error::syntax(
+            SyntaxError::InvalidNotationDecl {
+                reason: "missing ExternalId or PublicId",
+            },
+            stream,
+        ));
     }
 
     stream.consume_whitespace();
@@ -1340,7 +1361,7 @@ fn parse_external_id<'a>(
     }
 
     if optionality == Optionality::Required {
-        Err(Error::syntax(SyntaxError::MissingRequiredExternalId))
+        Err(error::syntax(SyntaxError::MissingRequiredExternalId, stream))
     } else {
         Ok(None)
     }
@@ -1382,9 +1403,10 @@ fn parse_public_id_literal<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a 
                         | b'+' | b',' | b'.' | b'/' | b':' | b'=' | b'?' | b';' | b'!' | b'*' | b'#' | b'@' | b'$' | b'_' | b'%')
         {
             // TODO actual error
-            return Err(Error::syntax(SyntaxError::InvalidPublicIdLiteral {
-                c: current as char,
-            }));
+            return Err(error::syntax(
+                SyntaxError::InvalidPublicIdLiteral { c: current as char },
+                stream,
+            ));
         }
 
         stream.advance(1);
@@ -1407,9 +1429,10 @@ fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'
 
     // An element type MUST NOT be declared more than once.
     if ctx.element_types.iter().any(|el| el.name == name) {
-        return Err(Error::validation(ValidationError::DuplicateElementType {
-            name: name.into(),
-        }));
+        return Err(error::validation(
+            ValidationError::DuplicateElementType { name: name.into() },
+            stream,
+        ));
     }
 
     if stream.peek_seq("EMPTY") {
@@ -1444,7 +1467,7 @@ fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'
             });
         }
     } else {
-        return Err(Error::syntax(SyntaxError::MalformedElementTypeDecl));
+        return Err(error::syntax(SyntaxError::MalformedElementTypeDecl, stream));
     }
 
     stream.consume_whitespace();
@@ -1478,9 +1501,10 @@ fn parse_mixed_content<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>, 
 
             // The same name MUST NOT appear more than once in a single mixed-content declaration.
             if names.contains(&name) {
-                return Err(Error::validation(ValidationError::DuplicateMixedContent {
-                    name: name.into(),
-                }));
+                return Err(error::validation(
+                    ValidationError::DuplicateMixedContent { name: name.into() },
+                    stream,
+                ));
             }
 
             names.push(name);
@@ -1576,17 +1600,17 @@ fn parse_entity_def<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> 
             .insert(name, Entity::new(name, EntityType::InternalGeneral { value }));
     } else {
         let Some((system_id, public_id)) = parse_external_id(stream, Optionality::Required)? else {
-            // TODO: Error type?
-            return Err(Error::syntax(SyntaxError::MissingRequiredExternalId));
+            return Err(error::syntax(SyntaxError::MissingRequiredExternalId, stream));
         };
 
         stream.consume_whitespace();
 
         if stream.peek_seq("NDATA") {
             if !stream.has_preceeding_whitespace() {
-                return Err(Error::syntax(SyntaxError::MissingRequiredWhitespace {
-                    at: "before NDATA",
-                }));
+                return Err(error::syntax(
+                    SyntaxError::MissingRequiredWhitespace { at: "before NDATA" },
+                    stream,
+                ));
             }
 
             let ndata = parse_ndata_decl(stream)?;
@@ -1642,9 +1666,10 @@ fn parse_entity_value<'a>(stream: &mut TokenStream<'a>, _name: &'a str) -> Parse
                 // PEReference  ::= '%' Name ';'
                 b'%' => {
                     let pe_ref = parse_parameter_entity_ref(stream)?;
-                    return Err(Error::syntax(SyntaxError::IllegalParameteEntityRef {
-                        ref_: pe_ref.into(),
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::IllegalParameteEntityRef { ref_: pe_ref.into() },
+                        stream,
+                    ));
                 }
                 // EntityRef or CharRef
                 b'&' => {
@@ -1684,10 +1709,13 @@ fn parse_element<'a>(
         && let ElementType::Root = kind
         && doc_name != start_qname.local
     {
-        return Err(Error::validation(ValidationError::InvalidRootElementType {
-            expected: doc_name.into(),
-            actual: start_qname.local.into(),
-        }));
+        return Err(error::validation(
+            ValidationError::InvalidRootElementType {
+                expected: doc_name.into(),
+                actual: start_qname.local.into(),
+            },
+            stream,
+        ));
     }
 
     let mut is_open = false;
@@ -1716,10 +1744,13 @@ fn parse_element<'a>(
             c => {
                 // Attributes need a leading white space
                 if !stream.is_white_space()? {
-                    return Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-                        expected: "a space".into(),
-                        actual: c as char,
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::UnexpectedCharacter {
+                            expected: "a space".into(),
+                            actual: c as char,
+                        },
+                        stream,
+                    ));
                 }
                 stream.consume_whitespace();
 
@@ -1732,24 +1763,25 @@ fn parse_element<'a>(
                         if local == XML_PREFIX {
                             // 'xml' prefix can only be bound to the 'http://www.w3.org/XML/1998/namespace' namespace
                             if value != XML_URI {
-                                return Err(Error::syntax(SyntaxError::InvalidXmlPrefixUri));
+                                return Err(error::syntax(SyntaxError::InvalidXmlPrefixUri, stream));
                             }
                         }
 
                         // Prefixes other than `xml` MUST NOT be bound to the `http://www.w3.org/XML/1998/namespace` namespace name
                         if value == XML_URI {
-                            return Err(Error::syntax(SyntaxError::UnexpectedXmlUri));
+                            return Err(error::syntax(SyntaxError::UnexpectedXmlUri, stream));
                         }
 
                         // The 'xmlns' prefix is bound to the 'http://www.w3.org/2000/xmlns/' namespace and MUST NOT be declared
                         if value == XMLNS_URI {
-                            return Err(Error::syntax(SyntaxError::UnexpectedXmlnsUri));
+                            return Err(error::syntax(SyntaxError::UnexpectedXmlnsUri, stream));
                         }
 
                         if namespaces.iter().any(|ns| ns.name == Some(local)) {
-                            return Err(Error::validation(ValidationError::DuplicateNamespace {
-                                name: local.into(),
-                            }));
+                            return Err(error::validation(
+                                ValidationError::DuplicateNamespace { name: local.into() },
+                                stream,
+                            ));
                         }
 
                         ctx.prefixes.insert(local);
@@ -1759,7 +1791,7 @@ fn parse_element<'a>(
                     None if local == XMLNS_PREFIX => {
                         // The 'xmlns' prefix is bound to the 'http://www.w3.org/2000/xmlns/' namespace and MUST NOT be declared
                         if value == XMLNS_URI {
-                            return Err(Error::syntax(SyntaxError::UnexpectedXmlnsUri));
+                            return Err(error::syntax(SyntaxError::UnexpectedXmlnsUri, stream));
                         }
 
                         namespaces.push(Namespace::new(None, value));
@@ -1767,13 +1799,17 @@ fn parse_element<'a>(
                     // Prefixed Attribute
                     Some(prefix) => {
                         if !ctx.prefixes.contains(prefix) {
-                            return Err(Error::validation(ValidationError::UnknownPrefix {
-                                name: prefix.into(),
-                            }));
+                            return Err(error::validation(
+                                ValidationError::UnknownPrefix { name: prefix.into() },
+                                stream,
+                            ));
                         }
 
                         if attributes.iter().any(|a: &Attribute| a.qname.local == local) {
-                            return Err(Error::syntax(SyntaxError::DuplicateAttribute { name: local.into() }));
+                            return Err(error::syntax(
+                                SyntaxError::DuplicateAttribute { name: local.into() },
+                                stream,
+                            ));
                         }
 
                         attributes.push(Attribute { qname, value });
@@ -1781,7 +1817,10 @@ fn parse_element<'a>(
                     // Unprefixed Attribute
                     None => {
                         if attributes.iter().any(|a: &Attribute| a.qname.local == local) {
-                            return Err(Error::syntax(SyntaxError::DuplicateAttribute { name: local.into() }));
+                            return Err(error::syntax(
+                                SyntaxError::DuplicateAttribute { name: local.into() },
+                                stream,
+                            ));
                         }
 
                         attributes.push(Attribute { qname, value });
@@ -1806,7 +1845,10 @@ fn parse_element<'a>(
             ),
             None => (start_qname.local.to_string(), end_qname.local.to_string()),
         };
-        return Err(Error::syntax(SyntaxError::ElementNameMismatch { expected, actual }));
+        return Err(error::syntax(
+            SyntaxError::ElementNameMismatch { expected, actual },
+            stream,
+        ));
     }
 
     // root node
@@ -1834,7 +1876,7 @@ fn parse_element_start<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     stream.advance(1);
 
     if stream.is_white_space()? {
-        return Err(Error::syntax(SyntaxError::InvalidXmlName));
+        return Err(error::syntax(SyntaxError::InvalidXmlName, stream));
     }
 
     let qname = parse_qname(stream, ctx)?;
@@ -1842,7 +1884,7 @@ fn parse_element_start<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     if let Some(prefix) = qname.prefix
         && prefix == XMLNS_PREFIX
     {
-        return Err(Error::syntax(SyntaxError::ReservedPrefix));
+        return Err(error::syntax(SyntaxError::ReservedPrefix, stream));
     }
 
     Ok(qname)
@@ -1900,17 +1942,17 @@ fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>
             Ok('&') => {
                 owned = true;
                 let entity_name = parse_entity_ref(stream)?;
-                let entity_type = ctx.get_entity(entity_name)?.entity_type;
+                let entity_type = ctx.get_entity(stream, entity_name)?.entity_type;
                 match entity_type {
                     EntityType::InternalGeneral { value } => {
                         if value.contains('<') {
-                            return Err(Error::syntax(SyntaxError::UnescapedLTInAttrValue));
+                            return Err(error::syntax(SyntaxError::UnescapedLTInAttrValue, stream));
                         }
 
                         if value.contains('&') {
-                            ctx.get_entity_mut(entity_name)?.expanding = true;
+                            ctx.get_entity_mut(stream, entity_name)?.expanding = true;
                             normalized.extend(expand_entity_ref(stream, ctx, value, false)?);
-                            ctx.get_entity_mut(entity_name)?.expanding = false;
+                            ctx.get_entity_mut(stream, entity_name)?.expanding = false;
                         } else {
                             normalized.extend_from_slice(value.as_bytes());
                         }
@@ -1918,16 +1960,19 @@ fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>
                     EntityType::ExternalGeneralUnparsed { .. }
                     | EntityType::ExternalParameter { .. }
                     | EntityType::ExternalGeneralParsed { .. } => {
-                        return Err(Error::syntax(SyntaxError::ExternalEntityRefInAttribute {
-                            ref_: entity_name.into(),
-                        }));
+                        return Err(error::syntax(
+                            SyntaxError::ExternalEntityRefInAttribute {
+                                ref_: entity_name.into(),
+                            },
+                            stream,
+                        ));
                     }
                     EntityType::InternalParameter { .. } => unimplemented!("internal parameter entity"),
                     EntityType::InternalPredefined { .. } => unimplemented!("internal predefined"),
                 }
             }
-            Ok('<') => return Err(Error::syntax(SyntaxError::UnescapedLTInAttrValue)),
-            Ok(c) if !validate::is_xml_char(c) => return Err(Error::syntax(SyntaxError::InvalidXmlChar { c })),
+            Ok('<') => return Err(error::syntax(SyntaxError::UnescapedLTInAttrValue, stream)),
+            Ok(c) if !validate::is_xml_char(c) => return Err(error::syntax(SyntaxError::InvalidXmlChar { c }, stream)),
             Ok(c) => {
                 normalize_char(c, &mut normalized);
                 stream.advance(c.len_utf8())
@@ -1958,7 +2003,7 @@ fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>
 }
 
 fn expand_entity_ref<'a>(
-    _stream: &mut TokenStream<'a>,
+    stream: &mut TokenStream<'a>,
     ctx: &mut Context<'a>,
     entity_ref: &'a str,
     allow_external: bool,
@@ -1979,9 +2024,12 @@ fn expand_entity_ref<'a>(
         match bytes[pos] {
             b'&' => {
                 if in_ref {
-                    return Err(Error::syntax(SyntaxError::MalformedEntityReference {
-                        reason: "Illegal character in entity reference '&'",
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::MalformedEntityReference {
+                            reason: "Illegal character in entity reference '&'",
+                        },
+                        stream,
+                    ));
                 }
                 in_ref = true;
                 ref_start = pos;
@@ -1992,31 +2040,38 @@ fn expand_entity_ref<'a>(
                 }
 
                 if pos - ref_start <= 1 {
-                    return Err(Error::syntax(SyntaxError::MalformedEntityReference {
-                        reason: "empty entity reference",
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::MalformedEntityReference {
+                            reason: "empty entity reference",
+                        },
+                        stream,
+                    ));
                 }
 
                 let name = &entity_ref[ref_start + 1..pos];
                 let entity = match ctx.entities.get(&name) {
                     Some(entity) => entity,
                     None => {
-                        return Err(Error::validation(ValidationError::UnknownEntityReference {
-                            ref_: name.to_string(),
-                        }));
+                        return Err(error::validation(
+                            ValidationError::UnknownEntityReference { ref_: name.to_string() },
+                            stream,
+                        ));
                     }
                 };
 
                 if entity.expanding {
-                    return Err(Error::syntax(SyntaxError::RecursiveEntityReference {
-                        ref_: entity.name.into(),
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::RecursiveEntityReference {
+                            ref_: entity.name.into(),
+                        },
+                        stream,
+                    ));
                 }
 
                 match entity.entity_type {
                     EntityType::InternalGeneral { value } => {
                         if value.contains('&') {
-                            expanded.extend(expand_entity_ref(_stream, ctx, value, false)?);
+                            expanded.extend(expand_entity_ref(stream, ctx, value, false)?);
                         } else {
                             expanded.extend(value.as_bytes());
                         }
@@ -2025,9 +2080,12 @@ fn expand_entity_ref<'a>(
                     | EntityType::ExternalParameter { .. }
                     | EntityType::ExternalGeneralParsed { .. } => {
                         if !allow_external {
-                            return Err(Error::syntax(SyntaxError::ExternalEntityRefInAttribute {
-                                ref_: entity_ref.into(),
-                            }));
+                            return Err(error::syntax(
+                                SyntaxError::ExternalEntityRefInAttribute {
+                                    ref_: entity_ref.into(),
+                                },
+                                stream,
+                            ));
                         }
                     }
                     EntityType::InternalParameter { .. } => unimplemented!("internal parameter entity"),
@@ -2045,9 +2103,12 @@ fn expand_entity_ref<'a>(
     }
 
     if in_ref {
-        return Err(Error::syntax(SyntaxError::MalformedEntityReference {
-            reason: "unclosed entity ref",
-        }));
+        return Err(error::syntax(
+            SyntaxError::MalformedEntityReference {
+                reason: "unclosed entity ref",
+            },
+            stream,
+        ));
     }
 
     Ok(expanded)
@@ -2058,7 +2119,7 @@ fn parse_element_end<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) ->
     stream.advance(2);
 
     if stream.is_white_space()? {
-        return Err(Error::syntax(SyntaxError::InvalidXmlName));
+        return Err(error::syntax(SyntaxError::InvalidXmlName, stream));
     }
 
     let qname = parse_qname(stream, ctx)?;
@@ -2080,28 +2141,29 @@ fn parse_qname<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> Parse
 
     if stream.current_byte()? != b':' {
         if local.is_empty() {
-            return Err(Error::syntax(SyntaxError::InvalidXmlName));
+            return Err(error::syntax(SyntaxError::InvalidXmlName, stream));
         }
         return Ok(QName { prefix: None, local });
     }
 
     let prefix = local;
     if prefix.is_empty() {
-        return Err(Error::syntax(SyntaxError::InvalidXmlName));
+        return Err(error::syntax(SyntaxError::InvalidXmlName, stream));
     }
 
     // 'xml' prefix will be mapped to 'http://www.w3.org/XML/1998/namespace'
     if prefix != XML_PREFIX && !ctx.has_prefix(prefix) {
-        return Err(Error::validation(ValidationError::UnknownPrefix {
-            name: prefix.into(),
-        }));
+        return Err(error::validation(
+            ValidationError::UnknownPrefix { name: prefix.into() },
+            stream,
+        ));
     }
 
     stream.expect_byte(b':')?;
 
     let local = parse_nc_name(stream)?;
     if local.is_empty() {
-        return Err(Error::syntax(SyntaxError::InvalidXmlName));
+        return Err(error::syntax(SyntaxError::InvalidXmlName, stream));
     }
 
     Ok(QName {
@@ -2127,24 +2189,27 @@ fn parse_content<'a>(
             b'<' if stream.starts_with("</") => break,
             b'&' => {
                 let entity_name = parse_entity_ref(stream)?;
-                let entity_type = ctx.get_entity(entity_name)?.entity_type;
+                let entity_type = ctx.get_entity(stream, entity_name)?.entity_type;
                 match entity_type {
                     EntityType::InternalGeneral { value } => {
                         if value.contains('<') {
-                            return Err(Error::syntax(SyntaxError::UnescapedLTInAttrValue));
+                            return Err(error::syntax(SyntaxError::UnescapedLTInAttrValue, stream));
                         }
                         if value.contains('&') {
-                            ctx.get_entity_mut(entity_name)?.expanding = true;
+                            ctx.get_entity_mut(stream, entity_name)?.expanding = true;
                             let _ = expand_entity_ref(stream, ctx, value, true)?;
-                            ctx.get_entity_mut(entity_name)?.expanding = false;
+                            ctx.get_entity_mut(stream, entity_name)?.expanding = false;
                         }
                     }
                     EntityType::ExternalGeneralUnparsed { .. }
                     | EntityType::ExternalParameter { .. }
                     | EntityType::ExternalGeneralParsed { .. } => {
-                        return Err(Error::syntax(SyntaxError::IllegalUnparsedEntity {
-                            ref_: entity_name.into(),
-                        }));
+                        return Err(error::syntax(
+                            SyntaxError::IllegalUnparsedEntity {
+                                ref_: entity_name.into(),
+                            },
+                            stream,
+                        ));
                     }
                     EntityType::InternalParameter { .. } => unimplemented!("internal parameter entity"),
                     EntityType::InternalPredefined { .. } => unimplemented!("internal predefined"),
@@ -2178,9 +2243,12 @@ fn parse_character_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<ch
                 b';' => break,
                 b if b.is_ascii_hexdigit() => stream.advance(1),
                 _ => {
-                    return Err(Error::syntax(SyntaxError::InvalidCharRef {
-                        reason: "invalid hexadecimal value".into(),
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::InvalidCharRef {
+                            reason: "invalid hexadecimal value".into(),
+                        },
+                        stream,
+                    ));
                 }
             }
         }
@@ -2188,9 +2256,12 @@ fn parse_character_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<ch
         match u32::from_str_radix(stream.slice_from(start), 16) {
             Ok(value) => value,
             Err(err) => {
-                return Err(Error::syntax(SyntaxError::InvalidCharRef {
-                    reason: err.to_string(),
-                }));
+                return Err(error::syntax(
+                    SyntaxError::InvalidCharRef {
+                        reason: err.to_string(),
+                    },
+                    stream,
+                ));
             }
         }
     } else {
@@ -2199,18 +2270,24 @@ fn parse_character_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<ch
                 b';' => break,
                 b if b.is_ascii_digit() => stream.advance(1),
                 _ => {
-                    return Err(Error::syntax(SyntaxError::InvalidCharRef {
-                        reason: "invalid decimal value".into(),
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::InvalidCharRef {
+                            reason: "invalid decimal value".into(),
+                        },
+                        stream,
+                    ));
                 }
             }
         }
         match u32::from_str(stream.slice_from(start)) {
             Ok(value) => value,
             Err(err) => {
-                return Err(Error::syntax(SyntaxError::InvalidCharRef {
-                    reason: err.to_string(),
-                }));
+                return Err(error::syntax(
+                    SyntaxError::InvalidCharRef {
+                        reason: err.to_string(),
+                    },
+                    stream,
+                ));
             }
         }
     };
@@ -2218,16 +2295,22 @@ fn parse_character_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<ch
     let c = match char::from_u32(u32_value) {
         Some(c) => c,
         None => {
-            return Err(Error::syntax(SyntaxError::InvalidCharRef {
-                reason: format!("invalid char 'U+{u32_value:04x}'"),
-            }));
+            return Err(error::syntax(
+                SyntaxError::InvalidCharRef {
+                    reason: format!("invalid char 'U+{u32_value:04x}'"),
+                },
+                stream,
+            ));
         }
     };
 
     if !validate::is_xml_char(c) {
-        return Err(Error::syntax(SyntaxError::InvalidCharRef {
-            reason: format!("invalid XML char '{c}'"),
-        }));
+        return Err(error::syntax(
+            SyntaxError::InvalidCharRef {
+                reason: format!("invalid XML char '{c}'"),
+            },
+            stream,
+        ));
     }
 
     stream.advance(1);
@@ -2256,7 +2339,7 @@ fn parse_cdata<'a>(
 
     loop {
         if stream.is_at_end() {
-            return Err(Error::eof());
+            return Err(error::eof());
         }
 
         if stream.unchecked_current_byte() == b']' && stream.peek_seq("]]>") {
@@ -2267,7 +2350,7 @@ fn parse_cdata<'a>(
     }
 
     let data = stream.slice(start, stream.pos);
-    validate::is_xml_chars(data)?;
+    validate::is_xml_chars(stream, data)?;
     stream.advance(3);
 
     let id = ctx.current_id();
@@ -2290,7 +2373,7 @@ fn parse_text<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
 
     let text = stream.slice(start, stream.pos);
     if text.contains("]]>") {
-        return Err(Error::syntax(SyntaxError::InvalidCharData));
+        return Err(error::syntax(SyntaxError::InvalidCharData, stream));
     }
 
     Ok(text)
@@ -2306,7 +2389,7 @@ fn parse_comment<'a>(
     stream.advance(4);
     loop {
         if stream.is_at_end() {
-            return Err(Error::eof());
+            return Err(error::eof());
         }
 
         // For compatibility, the string "--" (double-hyphen) must not occur within comments.
@@ -2315,7 +2398,7 @@ fn parse_comment<'a>(
                 break;
             }
 
-            return Err(Error::syntax(SyntaxError::InvalidComment));
+            return Err(error::syntax(SyntaxError::InvalidComment, stream));
         }
 
         stream.advance(1);
@@ -2323,7 +2406,7 @@ fn parse_comment<'a>(
 
     stream.advance(3);
     let comment = stream.slice(start, stream.pos);
-    validate::is_xml_chars(comment)?;
+    validate::is_xml_chars(stream, comment)?;
 
     let id = ctx.current_id();
     let node = Node::new(id, parent, NodeKind::Comment(comment));
@@ -2362,28 +2445,37 @@ fn parse_element_content_children<'a>(
             }
             b')' => {
                 if expecting_content {
-                    return Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-                        expected: "content".into(),
-                        actual: ')',
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::UnexpectedCharacter {
+                            expected: "content".into(),
+                            actual: ')',
+                        },
+                        stream,
+                    ));
                 }
                 break;
             }
             b',' => {
                 if expecting_content {
-                    return Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-                        expected: "content".into(),
-                        actual: ',',
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::UnexpectedCharacter {
+                            expected: "content".into(),
+                            actual: ',',
+                        },
+                        stream,
+                    ));
                 }
 
                 match content_type {
                     None => content_type = Some(Type::Seq),
                     Some(Type::Choice) => {
-                        return Err(Error::syntax(SyntaxError::InvalidElementContentSeparator {
-                            expected: ',',
-                            actual: '|',
-                        }));
+                        return Err(error::syntax(
+                            SyntaxError::InvalidElementContentSeparator {
+                                expected: ',',
+                                actual: '|',
+                            },
+                            stream,
+                        ));
                     }
                     Some(Type::Seq) => {}
                 }
@@ -2394,19 +2486,25 @@ fn parse_element_content_children<'a>(
             }
             b'|' => {
                 if expecting_content {
-                    return Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-                        expected: "content".into(),
-                        actual: '|',
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::UnexpectedCharacter {
+                            expected: "content".into(),
+                            actual: '|',
+                        },
+                        stream,
+                    ));
                 }
 
                 match content_type {
                     None => content_type = Some(Type::Choice),
                     Some(Type::Seq) => {
-                        return Err(Error::syntax(SyntaxError::InvalidElementContentSeparator {
-                            expected: '|',
-                            actual: ',',
-                        }));
+                        return Err(error::syntax(
+                            SyntaxError::InvalidElementContentSeparator {
+                                expected: '|',
+                                actual: ',',
+                            },
+                            stream,
+                        ));
                     }
                     Some(Type::Choice) => {}
                 }
@@ -2416,10 +2514,13 @@ fn parse_element_content_children<'a>(
             }
             b'(' => {
                 if !expecting_content {
-                    return Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-                        expected: "non-content/grouping".into(),
-                        actual: '(',
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::UnexpectedCharacter {
+                            expected: "non-content/grouping".into(),
+                            actual: '(',
+                        },
+                        stream,
+                    ));
                 }
 
                 stream.advance(1);
@@ -2441,10 +2542,13 @@ fn parse_element_content_children<'a>(
             }
             c => {
                 if !expecting_content {
-                    return Err(Error::syntax(SyntaxError::UnexpectedCharacter {
-                        expected: "non-content".into(),
-                        actual: c as char,
-                    }));
+                    return Err(error::syntax(
+                        SyntaxError::UnexpectedCharacter {
+                            expected: "non-content".into(),
+                            actual: c as char,
+                        },
+                        stream,
+                    ));
                 }
 
                 let name = parse_name(stream)?;
@@ -2522,38 +2626,6 @@ mod test {
     use super::*;
     use crate::error::*;
 
-    fn context() -> Context<'static> {
-        Context {
-            doc: Document {
-                name: None,
-                root_node_id: None,
-                nodes: Vec::new(),
-            },
-            prefixes: HashSet::new(),
-            entities: HashMap::new(),
-            notations: HashMap::new(),
-            attr_decls: HashMap::new(),
-            element_types: Vec::new(),
-            current_node_id: 0,
-        }
-    }
-
-    fn context_temp_elements() -> Context<'static> {
-        Context {
-            doc: Document {
-                name: None,
-                root_node_id: None,
-                nodes: Vec::new(),
-            },
-            prefixes: HashSet::new(),
-            entities: HashMap::new(),
-            notations: HashMap::new(),
-            attr_decls: HashMap::new(),
-            element_types: Vec::new(),
-            current_node_id: 0,
-        }
-    }
-
     fn stream_from(source: &str) -> TokenStream<'_> {
         TokenStream {
             source,
@@ -2574,7 +2646,7 @@ mod test {
     #[test]
     fn test_parse_pi() {
         let mut stream = stream_from(r#"<?hello world?>"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(res.is_ok());
     }
@@ -2582,7 +2654,7 @@ mod test {
     #[test]
     fn test_parse_pi_empty() {
         let mut stream = stream_from(r#"<?hello?>"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(res.is_ok());
     }
@@ -2590,21 +2662,21 @@ mod test {
     #[test]
     fn test_parse_pi_reserved_target() {
         let mut stream = stream_from(r#"<?xml world?>"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(
             res,
             Err(Error {
                 kind: ErrorKind::Syntax(SyntaxError::UnexpectedDeclaration),
                 ..
-            })
+            },)
         ));
     }
 
     #[test]
     fn test_parse_pi_invalid_target_leading_whitespace() {
         let mut stream = stream_from(r#"<? target world?>"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(
             res,
@@ -2618,7 +2690,7 @@ mod test {
     #[test]
     fn test_parse_pi_unexpected_eos() {
         let mut stream = stream_from(r#"<?target"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(
             res,
@@ -2632,7 +2704,7 @@ mod test {
     #[test]
     fn test_parse_pi_invalid_name() {
         let mut stream = stream_from("<?L\u{FFFE}L hehe?>");
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(res.is_err());
     }
@@ -2640,7 +2712,7 @@ mod test {
     #[test]
     fn test_parse_pi_invalid_close_1() {
         let mut stream = stream_from(r#"<?target data?"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(
             res,
@@ -2654,7 +2726,7 @@ mod test {
     #[test]
     fn test_parse_pi_invalid_close_2() {
         let mut stream = stream_from(r#"<?target data?<a/>"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(
             res,
@@ -2668,7 +2740,7 @@ mod test {
     #[test]
     fn test_parse_pi_invalid_data() {
         let mut stream = stream_from("<?target dat\u{FFFF}a?>");
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_processing_instruction(&mut stream, &mut ctx, None);
         assert!(matches!(
             res,
@@ -2689,7 +2761,7 @@ mod test {
     #[test]
     fn test_parse_stag_reserved_prefix() {
         let mut stream = stream_from(r#"<xmlns:world/>"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_element_start(&mut stream, &mut ctx);
         assert!(matches!(
             res,
@@ -2703,7 +2775,7 @@ mod test {
     #[test]
     fn test_parse_ns_decl() {
         let mut stream = stream_from(r#"xmlns:foo="https://www.google.com""#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_attribute(&mut stream, &mut ctx);
         assert!(res.is_ok());
     }
@@ -2711,7 +2783,7 @@ mod test {
     #[test]
     fn test_parse_ns_decl_default() {
         let mut stream = stream_from(r#"xmlns="https://www.google.com""#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_attribute(&mut stream, &mut ctx);
         assert!(res.is_ok());
     }
@@ -2719,7 +2791,7 @@ mod test {
     #[test]
     fn test_parse_invalid_xml_prefix_uri() {
         let mut stream = stream_with_element(r#"<root xmlns:xml="https://www.google.com"/>"#);
-        let mut ctx = context_temp_elements();
+        let mut ctx = Context::default();
         let res = parse_element(&mut stream, &mut ctx, ElementType::Root, None);
         assert!(matches!(
             res,
@@ -2733,7 +2805,7 @@ mod test {
     #[test]
     fn test_parse_unexpected_xml_uri() {
         let mut stream = stream_with_element(r#"<root><foo xmlns:a="http://www.w3.org/XML/1998/namespace"/></root>"#);
-        let mut ctx = context_temp_elements();
+        let mut ctx = Context::default();
         let res = parse_element(&mut stream, &mut ctx, ElementType::Root, None);
         assert!(matches!(
             res,
@@ -2747,7 +2819,7 @@ mod test {
     #[test]
     fn test_parse_unexpected_xmlns_uri() {
         let mut stream = stream_with_element(r#"<root><foo xmlns:a="http://www.w3.org/2000/xmlns/"/><root>"#);
-        let mut ctx = context_temp_elements();
+        let mut ctx = Context::default();
         let res = parse_element(&mut stream, &mut ctx, ElementType::Root, None);
         assert!(matches!(
             res,
@@ -2761,7 +2833,7 @@ mod test {
     #[test]
     fn test_parse_unexpected_xmlns_uri_default() {
         let mut stream = stream_with_element(r#"<root xmlns="http://www.w3.org/2000/xmlns/"/>"#);
-        let mut ctx = context_temp_elements();
+        let mut ctx = Context::default();
         let res = parse_element(&mut stream, &mut ctx, ElementType::Root, None);
         assert!(matches!(
             res,
@@ -2776,7 +2848,7 @@ mod test {
     #[test]
     fn test_parse_stag() {
         let mut stream = stream_from(r#"<hello/>"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_element_start(&mut stream, &mut ctx);
         assert!(res.is_ok());
     }
@@ -2832,7 +2904,7 @@ mod test {
     #[test]
     fn test_parse_element_namespace_declaration() {
         let mut stream = stream_from(r#"<tag xmlns:foo="http://www.google.com"/>"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_element(&mut stream, &mut ctx, ElementType::Child, None);
         assert!(res.is_ok());
     }
@@ -2840,7 +2912,7 @@ mod test {
     #[test]
     fn test_parse_element_default_namespace_declaration() {
         let mut stream = stream_from(r#"<tag xmlns="http://www.google.com"/>"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_element(&mut stream, &mut ctx, ElementType::Child, None);
         assert!(res.is_ok());
     }
@@ -2848,7 +2920,7 @@ mod test {
     #[test]
     fn test_parse_element_with_attributes() {
         let mut stream = stream_from(r#"<tag some="value" another="one"></tag>"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_element(&mut stream, &mut ctx, ElementType::Child, None);
         assert!(res.is_ok());
     }
@@ -2856,7 +2928,7 @@ mod test {
     #[test]
     fn test_parse_element_empty_with_attributes() {
         let mut stream = stream_from(r#"<name some="value" another="one"/>"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_element(&mut stream, &mut ctx, ElementType::Child, None);
         assert!(res.is_ok());
     }
@@ -2864,7 +2936,7 @@ mod test {
     #[test]
     fn test_parse_attribute() {
         let mut stream = stream_from(r#"b="c""#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_attribute(&mut stream, &mut ctx);
         assert!(res.is_ok());
     }
@@ -2941,7 +3013,7 @@ mod test {
     #[test]
     fn test_parse_notation_decl_system_only() {
         let mut stream = stream_from(r#"<!NOTATION gif SYSTEM "hello.gif">"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_notation_decl(&mut stream, &mut ctx);
         assert!(res.is_ok());
     }
@@ -2949,7 +3021,7 @@ mod test {
     #[test]
     fn test_parse_notation_decl_public_only() {
         let mut stream = stream_from(r#"<!NOTATION gif PUBLIC 'hello.gif'>"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_notation_decl(&mut stream, &mut ctx);
         assert!(res.is_ok());
     }
@@ -2957,7 +3029,7 @@ mod test {
     #[test]
     fn test_parse_notation_decl_public_system() {
         let mut stream = stream_from(r#"<!NOTATION gif PUBLIC 'hello.gif' "sure why not">"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_notation_decl(&mut stream, &mut ctx);
         assert!(res.is_ok())
     }
@@ -2965,7 +3037,7 @@ mod test {
     #[test]
     fn test_parse_notation_decl_unclosed_quote() {
         let mut stream = stream_from(r#"<!NOTATION gif SYSTEM 'hello.gif">"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_notation_decl(&mut stream, &mut ctx);
         assert!(res.is_err())
     }
@@ -2973,7 +3045,7 @@ mod test {
     #[test]
     fn test_parse_notation_decl_public_system_missing_space() {
         let mut stream = stream_from(r#"<!NOTATION gif PUBLIC 'hello.gif'"sure why not">"#);
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_notation_decl(&mut stream, &mut ctx);
         assert!(res.is_err())
     }
@@ -2981,7 +3053,7 @@ mod test {
     #[test]
     fn test_parse_notation_decl_extra_whitespace() {
         let mut stream = stream_from("<!NOTATION  \t  gif \nSYSTEM \"hello.gif\"       >");
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_notation_decl(&mut stream, &mut ctx);
         assert!(res.is_ok())
     }
@@ -2989,7 +3061,7 @@ mod test {
     #[test]
     fn test_parse_notation_decl_missing_whitespace_after_decl() {
         let mut stream = stream_from("<!NOTATIONgif SYSTEM \"hello.gif\">");
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_notation_decl(&mut stream, &mut ctx);
         assert!(res.is_err())
     }
@@ -2997,7 +3069,7 @@ mod test {
     #[test]
     fn test_parse_notation_decl_missing_whitespace_after_name() {
         let mut stream = stream_from("<!NOTATION gifSYSTEM\"hello.gif\">");
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_notation_decl(&mut stream, &mut ctx);
         assert!(res.is_err())
     }
@@ -3005,7 +3077,7 @@ mod test {
     #[test]
     fn test_parse_notation_decl_missing_external_or_public_id() {
         let mut stream = stream_from("<!NOTATION gif \"hello.gif\">");
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_notation_decl(&mut stream, &mut ctx);
         assert!(res.is_err())
     }
@@ -3013,7 +3085,7 @@ mod test {
     #[test]
     fn test_parse_notation_decl_missing_external_or_public_id_2() {
         let mut stream = stream_from("<!NOTATION gif NOTSYSTEM \"hello.gif\">");
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_notation_decl(&mut stream, &mut ctx);
         assert!(res.is_err())
     }
@@ -3021,7 +3093,7 @@ mod test {
     #[test]
     fn test_parse_notation_duplicate_decl() {
         let mut stream = stream_from("<!NOTATION gif NOTSYSTEM \"hello.gif\">");
-        let mut ctx = context();
+        let mut ctx = Context::default();
         ctx.notations.insert(
             "gif",
             Notation {
@@ -3036,7 +3108,7 @@ mod test {
     #[test]
     fn test_parse_comment_empty() {
         let mut stream = stream_from("<!---->");
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_comment(&mut stream, &mut ctx, None);
         assert!(res.is_ok())
     }
@@ -3044,7 +3116,7 @@ mod test {
     #[test]
     fn test_comment_invalid_double_hyphen() {
         let mut stream = stream_from("<!----->");
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let res = parse_comment(&mut stream, &mut ctx, None);
         assert!(matches!(
             res,
@@ -3057,7 +3129,7 @@ mod test {
 
     #[test]
     fn test_expand_entity_ref_single() {
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let mut stream = stream_from("Hello, &world;!");
         let entity_ref = "Hello, &world;!";
         ctx.entities.insert(
@@ -3072,7 +3144,7 @@ mod test {
 
     #[test]
     fn test_expand_entity_ref_nested() {
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let mut stream = stream_from("Hello, &world;!");
         let entity_ref = "Hello, &world;";
         ctx.entities
@@ -3091,7 +3163,7 @@ mod test {
 
     #[test]
     fn test_expand_entity_ref_multiple() {
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let mut stream = stream_from("one &two; three &four; &five;");
         let entity_ref = "one &two; three &four; &five;";
         ctx.entities
@@ -3112,7 +3184,7 @@ mod test {
 
     #[test]
     fn test_expand_entity_ref_empty() {
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let mut stream = stream_from("ab&;cd");
         let entity_ref = "ab&;cd";
 
@@ -3122,7 +3194,7 @@ mod test {
 
     #[test]
     fn test_expand_entity_ref_unclosed() {
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let mut stream = stream_from("ab&cd");
         let entity_ref = "ab&cd";
 
@@ -3132,7 +3204,7 @@ mod test {
 
     #[test]
     fn test_expand_entity_ref_illegal_char() {
-        let mut ctx = context();
+        let mut ctx = Context::default();
         let mut stream = stream_from("ab&wh&at;cd");
         let entity_ref = "ab&wh&at;cd";
 
