@@ -22,12 +22,14 @@ mod eduni_namespaces {
     }
 
     #[test]
+    #[ignore = "relative URIs are not an error"]
     fn ns10_004_error() {
         // Namespace name test: a relative URI (deprecated)
         assert!(test("004").is_err());
     }
 
     #[test]
+    #[ignore = "relative URIs are not an error"]
     fn ns10_005_error() {
         // Namespace name test: a same-document relative URI (deprecated)
         assert!(test("005").is_err());

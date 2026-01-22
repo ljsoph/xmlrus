@@ -1810,7 +1810,10 @@ fn parse_element<'a>(
                             ));
                         }
 
-                        if attributes.iter().any(|a: &Attribute| a.qname.local == local) {
+                        if attributes
+                            .iter()
+                            .any(|a: &Attribute| a.qname.local == local && a.qname.prefix == Some(prefix))
+                        {
                             return Err(error::syntax(
                                 SyntaxError::DuplicateAttribute { name: local.into() },
                                 stream,
