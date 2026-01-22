@@ -351,21 +351,59 @@ impl std::error::Error for ValidationError {}
 impl Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidationError::DuplicateElementType { name } => {
+            Self::DuplicateElementType { name } => {
                 writeln!(f, "duplicate element type declaration '{name}'")
             }
-            ValidationError::DuplicateNamespace { name } => writeln!(f, "duplicate namespace '{name}'"),
-            ValidationError::DuplicateMixedContent { name } => {
+            Self::DuplicateNamespace { name } => writeln!(f, "duplicate namespace '{name}'"),
+            Self::DuplicateMixedContent { name } => {
                 writeln!(f, "duplicate mixed-content declaration '{name}'")
             }
-            ValidationError::DuplicateNotation { name } => writeln!(f, "duplicate notation declaration '{name}'"),
-            ValidationError::InvalidRootElementType { expected, actual } => {
+            Self::DuplicateNotation { name } => writeln!(f, "duplicate notation declaration '{name}'"),
+            Self::InvalidRootElementType { expected, actual } => {
                 writeln!(f, "invalid root element name: expected '{expected}' got '{actual}'")
             }
-            ValidationError::StandaloneDocument => writeln!(f, "standlone document TODO"),
-            ValidationError::UnknownEntityReference { ref_ } => writeln!(f, "unknown entity reference '{ref_}"),
-            ValidationError::UnknownPrefix { name } => writeln!(f, "unknown prefix '{name}"),
+            Self::StandaloneDocument => writeln!(f, "standlone document TODO"),
+            Self::UnknownEntityReference { ref_ } => writeln!(f, "unknown entity reference '{ref_}"),
+            Self::UnknownPrefix { name } => writeln!(f, "unknown prefix '{name}"),
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum NamespaceError {
+    /// No tag may contain two attributes which have qualified names with the same local part
+    /// and with prefixes which have been bound to namespace names that are identical.
+    ///
+    /// For example, each of the bad empty-element tags is illegal in the following:
+    ///
+    /// ```xml
+    /// <!-- http://www.w3.org is bound to n1 and n2 -->
+    /// <x xmlns:n1="http://www.w3.org"
+    ///    xmlns:n2="http://www.w3.org" >
+    ///   <bad a="1"     a="2" />
+    ///   <bad n1:a="1"  n2:a="2" />
+    /// </x>
+    /// ```
+    ///
+    /// However, each of the following is legal, the second because the default namespace does not apply to attribute names:
+    ///
+    /// ```xml
+    /// <!-- http://www.w3.org is bound to n1 and is the default -->
+    /// <x xmlns:n1="http://www.w3.org"
+    ///    xmlns="http://www.w3.org" >
+    ///   <good a="1"     b="2" />
+    ///   <good a="1"     n1:a="2" />
+    /// </x>
+    /// ```
+    DuplicateNamespaceAttribute,
+}
+
+impl std::error::Error for NamespaceError {}
+
+impl Display for NamespaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // match self {}
+        Ok(())
     }
 }
 

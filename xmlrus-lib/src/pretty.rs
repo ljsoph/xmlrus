@@ -103,7 +103,7 @@ where
             version,
             encoding,
             standalone,
-        } = first.data
+        } = &first.data
         {
             if self.print_doc_info {
                 indent += self.tab_size;

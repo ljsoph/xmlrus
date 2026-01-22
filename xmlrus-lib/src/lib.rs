@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -104,41 +105,25 @@ pub struct QName<'a> {
     local: &'a str,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Attribute<'a> {
     pub qname: QName<'a>,
-    pub value: &'a str,
+    pub value: Cow<'a, str>,
 }
 
-impl std::fmt::Debug for Attribute<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Attribute {{ name: ")?;
-        if let Some(prefix) = self.qname.prefix {
-            write!(f, "{}:", prefix)?;
-        }
-        write!(f, "{}, value: {} }}", self.qname.local, self.value)
-    }
-}
-
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Namespace<'a> {
     pub name: Option<&'a str>,
-    pub uri: &'a str,
+    pub uri: Cow<'a, str>,
 }
 
 impl<'a> Namespace<'a> {
-    fn new(name: Option<&'a str>, uri: &'a str) -> Self {
+    fn new(name: Option<&'a str>, uri: Cow<'a, str>) -> Self {
         Self { name, uri }
     }
 }
 
-impl std::fmt::Debug for Namespace<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Namespace {{ name: {:?}, uri: {} }}", self.name, self.uri,)
-    }
-}
-
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Node<'a> {
     pub id: usize,
     parent: Option<usize>,
@@ -151,18 +136,12 @@ impl<'a> Node<'a> {
     }
 }
 
-impl std::fmt::Debug for Node<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{}]{:#?}", self.id, self.data)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum NodeKind<'a> {
     Declaration {
         version: &'a str,
         encoding: Option<&'a str>,
-        standalone: Option<&'a str>,
+        standalone: Option<Cow<'a, str>>,
     },
     Element {
         name: QName<'a>,
@@ -286,7 +265,7 @@ enum EnumeratedType<'a> {
 enum DefaultDecl<'a> {
     Required,
     Implied,
-    Fixed { fixed: bool, value: &'a str },
+    Fixed { fixed: bool, value: Cow<'a, str> },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -1741,18 +1720,9 @@ fn parse_element<'a>(
                     },
                 ));
             }
-            c => {
-                // Attributes need a leading white space
-                if !stream.is_white_space()? {
-                    return Err(error::syntax(
-                        SyntaxError::UnexpectedCharacter {
-                            expected: "a space".into(),
-                            actual: c as char,
-                        },
-                        stream,
-                    ));
-                }
-                stream.consume_whitespace();
+            _ => {
+                // Attributes need leading white space
+                stream.expect_and_consume_whitespace("before attribute")?;
 
                 let (qname, value) = parse_attribute(stream, ctx)?;
                 let QName { prefix, local } = qname;
@@ -1901,7 +1871,7 @@ fn parse_element_start<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
 // Attribute  ::=  NSAttName Eq AttValue | QName Eq AttValue
 // AttValue   ::=  '"' ([^<&"] | Reference)* '"'
 //              |  "'" ([^<&'] | Reference)* "'"
-fn parse_attribute<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<(QName<'a>, &'a str)> {
+fn parse_attribute<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<(QName<'a>, Cow<'a, str>)> {
     let qname = parse_qname(stream, ctx)?;
     stream.consume_whitespace();
     stream.expect_byte(b'=')?;
@@ -1910,12 +1880,7 @@ fn parse_attribute<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> P
     Ok((qname, value))
 }
 
-enum StrSlice<'a> {
-    Borrowed(&'a str),
-    Owned(String),
-}
-
-fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<&'a str> {
+fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<Cow<'a, str>> {
     fn normalize_char(c: char, normalized: &mut Vec<u8>) {
         let len = c.len_utf8();
         if len > 1 {
@@ -1934,20 +1899,19 @@ fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>
     let mut owned = false;
 
     loop {
-        let current = stream.current_char();
-        match current {
-            Ok(d) if d == delimiter as char => break,
-            Ok('\r' | '\n' | '\t') => {
+        match stream.current_char()? {
+            d if d == delimiter as char => break,
+            '\r' | '\n' | '\t' => {
                 owned = true;
                 normalized.push(b' ');
                 stream.advance(1);
             }
-            Ok('&') if stream.peek_byte() == Some(b'#') => {
+            '&' if stream.peek_byte() == Some(b'#') => {
                 owned = true;
                 let c = parse_character_reference(stream)?;
                 normalize_char(c, &mut normalized);
             }
-            Ok('&') => {
+            '&' => {
                 owned = true;
                 let entity_name = parse_entity_ref(stream)?;
                 let entity_type = ctx.get_entity(stream, entity_name)?.entity_type;
@@ -1979,35 +1943,23 @@ fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>
                     EntityType::InternalPredefined { .. } => unimplemented!("internal predefined"),
                 }
             }
-            Ok('<') => return Err(error::syntax(SyntaxError::UnescapedLTInAttrValue, stream)),
-            Ok(c) if !validate::is_xml_char(c) => return Err(error::syntax(SyntaxError::InvalidXmlChar { c }, stream)),
-            Ok(c) => {
+            '<' => return Err(error::syntax(SyntaxError::UnescapedLTInAttrValue, stream)),
+            c if !validate::is_xml_char(c) => return Err(error::syntax(SyntaxError::InvalidXmlChar { c }, stream)),
+            c => {
                 normalize_char(c, &mut normalized);
                 stream.advance(c.len_utf8())
             }
-            Err(err) => return Err(err),
         }
     }
 
-    // We should only break on the delimiter so this should not attempt to slice in the middle
-    // of a non-ascii character.
-    let value = stream.slice_from(start);
-    stream.advance(1);
-
     if owned {
-        println!(
-            "OWNED: {}",
-            String::from_utf8(normalized).expect("Attribute value contains invalid UTF-8"),
-        );
-        // Ok(StrSlice::Owned(
-        //     String::from_utf8(normalized).expect("Attribute value contains invalid UTF-8"),
-        // ))
+        let value = String::from_utf8(normalized).expect("Attribute value contains invalid UTF-8");
+        Ok(value.into())
     } else {
-        println!("BORROWED: {value}");
-        // Ok(StrSlice::Borrowed(value))
+        let value = stream.slice_from(start);
+        stream.advance(1);
+        Ok(Cow::Borrowed(value))
     }
-
-    Ok(value)
 }
 
 fn expand_entity_ref<'a>(
