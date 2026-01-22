@@ -1759,6 +1759,11 @@ fn parse_element<'a>(
                 match prefix {
                     // prefixed namespace - 'xmlns:prefix="foobarbaz"'
                     Some(prefix) if prefix == XMLNS_PREFIX => {
+                        // xmlns:prefix=""
+                        if value.is_empty() {
+                            return Err(error::syntax(SyntaxError::UnboundXmlnsPrefix, stream));
+                        }
+
                         // 'xml'
                         if local == XML_PREFIX {
                             // 'xml' prefix can only be bound to the 'http://www.w3.org/XML/1998/namespace' namespace

@@ -224,6 +224,15 @@ pub enum SyntaxError {
     /// `xmlns` is a reserved Namespace and must not be used
     ReservedPrefix,
 
+    /// In a namespace declaration for a prefix (i.e., where the NSAttName is a PrefixedAttName), the attribute value MUST NOT be empty.
+    ///
+    /// ```xml
+    /// <a xmlns:foo=""/>
+    /// ```
+    ///
+    /// Invalid in XML Namespaces 1.0 but allowed in 1.1
+    UnboundXmlnsPrefix,
+
     /// Missing required '?>'
     UnclosedDeclaration,
 
@@ -291,6 +300,7 @@ impl Display for SyntaxError {
             Self::MissingRequiredWhitespace { at } => writeln!(f, "missing required whitespace {at}"),
             Self::RecursiveEntityReference { ref_ } => writeln!(f, "recursive entity reference detected in '{ref_}"),
             Self::ReservedPrefix => writeln!(f, "'xmlns' is a reserved prefix"),
+            Self::UnboundXmlnsPrefix => writeln!(f, "XML namespace must not be empty"),
             Self::UnclosedDeclaration => writeln!(f, "unclosed declaration"),
             Self::UnescapedLTInAttrValue => writeln!(f, "unescaped '<' in attribute value"),
             Self::UnexpectedDeclaration => writeln!(f, "unexpected XML declaration"),
