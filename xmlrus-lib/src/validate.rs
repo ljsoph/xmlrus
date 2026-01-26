@@ -72,8 +72,66 @@ pub fn is_name_char(value: char) -> bool {
     )
 }
 
+pub fn is_name_char_u8(value: u8) -> bool {
+    if is_name_start_char_u8(value) {
+        return true;
+    }
+
+    let value = u32::from(value);
+
+    if value <= 128 {
+        #[allow(clippy::cast_possible_truncation)]
+        return matches!(value as u8, b'0'..=b'9' | b'-' | b'.');
+    }
+
+    matches!(value,
+        0xB7
+        | 0x0300..=0x036F
+        | 0x203F..=0x2040
+    )
+}
+
+pub fn is_name_start_char_u8(value: u8) -> bool {
+    let value = u32::from(value);
+
+    if value <= 128 {
+        #[allow(clippy::cast_possible_truncation)]
+        return matches!(value as u8 , b':' | b'A'..=b'Z' | b'_' | b'a'..=b'z');
+    }
+
+    matches!(value,
+        0xC0..=0xD6
+        | 0xD8..=0xF6
+        | 0xF8..=0x2FF
+        | 0x370..=0x37D
+        | 0x37F..=0x1FFF
+        | 0x200C..=0x200D
+        | 0x2070..=0x218F
+        | 0x2C00..=0x2FEF
+        | 0x3001..=0xD7FF
+        | 0xF900..=0xFDCF
+        | 0xFDF0..=0xFFFD
+        | 0x10000..=0xEFFFF
+    )
+}
+
 /// Validate a single `char` is in the XML Character Range
 pub fn is_xml_char(value: char) -> bool {
+    let value = u32::from(value);
+
+    matches!(value,
+        0x9   // '\t'
+        | 0xA // '\n'
+        | 0xD // '\r'
+        // Any Unicode character, excluding the surrogate blocks, FFFE, and FFFF.
+        | 0x20..=0xD7FF
+        | 0xE000..=0xFFFD
+        | 0x10000..=0x0010_FFFF
+    )
+}
+
+/// Validate a single `char` is in the XML Character Range
+pub fn is_xml_char_u8(value: u8) -> bool {
     let value = u32::from(value);
 
     matches!(value,
