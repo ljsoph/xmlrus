@@ -39,6 +39,14 @@ pub enum TokenKind<'a> {
     /// `([^%&"] | PEReference | Reference)*`
     EntityValue(&'a str),
 
+    // === AttType ===
+    /// `CDATA`
+    StringType,
+    /// TokenizedType
+    TokenizedType(TokenizedType),
+    /// EnumeratedType
+    EnumeratedType,
+
     // === Element ===
     /// `<`
     OpenTagStart,
@@ -97,6 +105,9 @@ impl<'a> Debug for TokenKind<'a> {
             Self::PubidLiteral(pubid_literal) => write!(f, "PubidLiteral(\"{pubid_literal}\")"),
             Self::SystemLiteral(system_literal) => write!(f, "SystemLiteral(\"{system_literal}\")"),
             Self::EntityValue(value) => write!(f, "EntityValue(\"{value}\")"),
+            Self::StringType => write!(f, "StringType(CDATA)"),
+            Self::TokenizedType(tokenized_type) => write!(f, "TokenizedType(\"{tokenized_type:?}\")"),
+            Self::EnumeratedType => write!(f, "EnumeratedType"),
             TokenKind::OpenTagStart => write!(f, "OpenTagStart"),
             TokenKind::TagEndStart => write!(f, "TagEndStart"),
             TokenKind::EmptyTagEnd => write!(f, "EmptyTagEnd"),
@@ -116,13 +127,6 @@ impl<'a> Debug for TokenKind<'a> {
             Self::Eof => write!(f, "Eof"),
         }
     }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-enum AttType {
-    String,
-    Tokenized(TokenizedType),
-    // Enumerated(EnumeratedType),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -311,7 +315,7 @@ fn chomp_attribute_value<'a>(stream: &mut InputStream<'a>) {
     stream.advance(1);
 }
 
-// [11] SystemLiteral  ::=  ('"' [^"]* '"') | ("'" [^']* "'")
+/// [11] SystemLiteral  ::=  ('"' [^"]* '"') | ("'" [^']* "'")
 fn chomp_system_literal<'a>(stream: &mut InputStream<'a>) {
     let (delimiter, kind) = match stream.current_byte() {
         Some(sq @ b'\'') => (sq, TokenKind::SingleQuote),
@@ -337,8 +341,8 @@ fn chomp_system_literal<'a>(stream: &mut InputStream<'a>) {
     stream.advance(1);
 }
 
-// [12] PubidLiteral  ::=  '"' PubidChar* '"' | "'" (PubidChar - "'")* "'"
-// [13] PubidChar     ::=  #x20 | #xD | #xA | [a-zA-Z0-9] | [-'()+,./:=?;!*#@$_%]
+/// [12] PubidLiteral  ::=  '"' PubidChar* '"' | "'" (PubidChar - "'")* "'"
+/// [13] PubidChar     ::=  #x20 | #xD | #xA | [a-zA-Z0-9] | [-'()+,./:=?;!*#@$_%]
 fn chomp_public_id_literal<'a>(stream: &mut InputStream<'a>) {
     let (delimiter, kind) = match stream.current_byte() {
         Some(sq @ b'\'') => (sq, TokenKind::SingleQuote),
@@ -395,8 +399,8 @@ fn chomp_comment<'a>(stream: &mut InputStream<'a>) {
     stream.advance(3);
 }
 
-// [16] PI        ::=   '<?' PITarget  (S (Char* - ( Char* '?>' Char*)))? '?>'
-// [17] PITarget  ::=   Name - (('X' | 'x') ('M' | 'm') ('L' | 'l'))
+/// [16] PI        ::=   '<?' PITarget  (S (Char* - ( Char* '?>' Char*)))? '?>'
+/// [17] PITarget  ::=   Name - (('X' | 'x') ('M' | 'm') ('L' | 'l'))
 fn chomp_processing_instruction<'a>(stream: &mut InputStream<'a>) {
     let offset = stream.pos;
 
@@ -616,7 +620,7 @@ fn chomp_element_start<'a>(stream: &mut InputStream<'a>) -> bool {
     has_content
 }
 
-// [43] content  ::=  CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
+/// [43] content  ::=  CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
 fn chomp_content<'a>(stream: &mut InputStream<'a>) {
     loop {
         match stream.current_byte() {
@@ -646,8 +650,8 @@ fn chomp_etag<'a>(stream: &mut InputStream<'a>) {
     }
 }
 
-// [45] elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
-// [46] contentspec  ::=  'EMPTY' | 'ANY' | Mixed | children
+/// [45] elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
+/// [46] contentspec  ::=  'EMPTY' | 'ANY' | Mixed | children
 fn chomp_element_type_decl<'a>(stream: &mut InputStream<'a>) {
     stream.push_token(TokenKind::MarkupDeclStart, stream.pos);
     stream.advance(9);
@@ -655,7 +659,7 @@ fn chomp_element_type_decl<'a>(stream: &mut InputStream<'a>) {
     unimplemented!("element type decl")
 }
 
-// [52] AttlistDecl  ::=  '<!ATTLIST' S Name AttDef* S? '>'
+/// [52] AttlistDecl  ::=  '<!ATTLIST' S Name AttDef* S? '>'
 fn chomp_attlist_decl<'a>(stream: &mut InputStream<'a>) {
     stream.push_token(TokenKind::MarkupDeclStart, stream.pos);
     stream.push_token(TokenKind::AttlistDecl, stream.pos);
@@ -667,6 +671,14 @@ fn chomp_attlist_decl<'a>(stream: &mut InputStream<'a>) {
 }
 
 /// [53] AttDef         ::=  S Name S AttType S DefaultDecl
+fn chomp_att_def<'a>(stream: &mut InputStream<'a>) {
+    chomp_whitespace(stream);
+    chomp_name(stream);
+    chomp_att_type(stream);
+    chomp_whitespace(stream);
+}
+
+/// [54] AttType        ::=  StringType | TokenizedType | EnumeratedType
 /// [55] StringType     ::=  'CDATA'
 /// [56] TokenizedType  ::=  'ID'
 ///                     | 'IDREF'
@@ -675,20 +687,58 @@ fn chomp_attlist_decl<'a>(stream: &mut InputStream<'a>) {
 ///                     | 'ENTITIES'
 ///                     | 'NMTOKEN'
 ///                     | 'NMTOKENS'
-fn chomp_att_def<'a>(stream: &mut InputStream<'a>) {
-    chomp_whitespace(stream);
-    chomp_name(stream);
-    chomp_att_type(stream);
-    chomp_whitespace(stream);
-    unimplemented!("att def")
+fn chomp_att_type<'a>(stream: &mut InputStream<'a>) {
+    if stream.starts_with("CDATA") {
+        stream.push_token(TokenKind::StringType, stream.pos);
+        stream.advance(5);
+    } else if stream.starts_with("ID") {
+        stream.push_token(TokenKind::TokenizedType(TokenizedType::Id), stream.pos);
+        stream.advance(2);
+    } else if stream.starts_with("IDREF") {
+        stream.push_token(TokenKind::TokenizedType(TokenizedType::IdRef), stream.pos);
+        stream.advance(5);
+    } else if stream.starts_with("IDREFS") {
+        stream.push_token(TokenKind::TokenizedType(TokenizedType::IdRefs), stream.pos);
+        stream.advance(6);
+    } else if stream.starts_with("ENTITY") {
+        stream.push_token(TokenKind::TokenizedType(TokenizedType::Entity), stream.pos);
+        stream.advance(6);
+    } else if stream.starts_with("ENTITIES") {
+        stream.push_token(TokenKind::TokenizedType(TokenizedType::Entities), stream.pos);
+        stream.advance(8);
+    } else if stream.starts_with("NMTOKEN") {
+        stream.push_token(TokenKind::TokenizedType(TokenizedType::NmToken), stream.pos);
+        stream.advance(7);
+    } else if stream.starts_with("NMTOKENS") {
+        stream.push_token(TokenKind::TokenizedType(TokenizedType::NmTokens), stream.pos);
+        stream.advance(8);
+    } else {
+        chomp_enumerated_type(stream)
+    }
 }
 
-/// [54] AttType  ::=  StringType | TokenizedType | EnumeratedType
-fn chomp_att_type<'a>(stream: &mut InputStream<'a>) {}
+/// [57]  EnumeratedType  ::=  NotationType | Enumeration
+fn chomp_enumerated_type<'a>(stream: &mut InputStream<'a>) {
+    if stream.starts_with("NOTATION") {
+        chomp_notation_type(stream);
+    } else if stream.starts_with("(") {
+        chomp_enumeration(stream);
+    }
+}
 
-// [70] EntityDecl  ::=  GEDecl | PEDecl
-// [71] GEDecl      ::=  '<!ENTITY' S Name S EntityDef S? '>'
-// [72] PEDecl      ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
+/// [58]  NotationType  ::=  'NOTATION' S '(' S? Name (S? '|' S? Name)* S? ')'
+fn chomp_notation_type<'a>(stream: &mut InputStream<'a>) {
+    unimplemented!("notation_typee")
+}
+
+/// [59]  Enumeration  ::=  '(' S? Nmtoken (S? '|' S? Nmtoken)* S? ')'
+fn chomp_enumeration<'a>(stream: &mut InputStream<'a>) {
+    unimplemented!("enumeratioin")
+}
+
+/// [70] EntityDecl  ::=  GEDecl | PEDecl
+/// [71] GEDecl      ::=  '<!ENTITY' S Name S EntityDef S? '>'
+/// [72] PEDecl      ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
 fn chomp_entity_decl<'a>(stream: &mut InputStream<'a>) {
     stream.push_token(TokenKind::MarkupDeclStart, stream.pos);
     stream.push_token(TokenKind::EntityDecl, stream.pos);
@@ -734,7 +784,7 @@ fn chomp_pe_def<'a>(stream: &mut InputStream<'a>) {
     chomp_whitespace(stream);
 }
 
-// [75] ExternalID  ::=  'SYSTEM' S SystemLiteral | 'PUBLIC' S PubidLiteral S SystemLiteral
+/// [75] ExternalID  ::=  'SYSTEM' S SystemLiteral | 'PUBLIC' S PubidLiteral S SystemLiteral
 fn chomp_external_id<'a>(stream: &mut InputStream<'a>) {
     chomp_whitespace(stream);
 
@@ -767,8 +817,8 @@ fn chomp_ndata_decl<'a>(stream: &mut InputStream<'a>) {
     }
 }
 
-// [82] NotationDecl  ::=  '<!NOTATION' S Name S (ExternalID | PublicID) S? '>'
-// [83] PublicID      ::=  'PUBLIC' S PubidLiteral
+/// [82] NotationDecl  ::=  '<!NOTATION' S Name S (ExternalID | PublicID) S? '>'
+/// [83] PublicID      ::=  'PUBLIC' S PubidLiteral
 fn chomp_notation_decl<'a>(stream: &mut InputStream<'a>) {
     stream.push_token(TokenKind::MarkupDeclStart, stream.pos);
     unimplemented!("notation decl")
