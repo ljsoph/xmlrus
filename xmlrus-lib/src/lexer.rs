@@ -1,59 +1,139 @@
-use std::{fmt::Debug, io::Read};
+use std::fmt::Debug;
 
-use crate::{
-    error::{self, ParseResult},
-    validate,
-};
+use crate::validate;
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum TokenKind<'a> {
-    AttributeValue(&'a str),
-    CharData(&'a str),
-    Comment(&'a str),
-    DTDEnd,
+    /// `<!DOCTYPE`
     DTDStart,
-    DoubleQuote,
-    EndTag(&'a str),
-    Eof,
-    Equal,
-    Name(&'a str),
-    Placeholder(&'a str),
-    ProcessingInstructionEnd,
-    ProcessingInstructionStart,
+    /// `>`
+    DTDEnd,
+    /// `[`
+    IntSubsetStart,
+    /// `]`
+    IntSubsetEnd,
+
+    // === markupdecl ===
+    /// `<`
+    MarkupDeclStart,
+    /// `>`
+    MarkupDeclEnd,
+    /// `<![CDATA[`
+    CDStart,
+    /// `]]>`
+    CDEnd,
+    /// `<!ENTITY`
+    EntityDecl,
+    /// `<!ATTLIST`
+    AttlistDecl,
+    /// Marks incoming EntityDef
+    GEDecl,
+    /// Marks incoming PEDef
+    PEDecl,
+    /// `NDATA`
+    NData,
+    /// `PUBLIC "PubidLiteral"`
     PubidLiteral(&'a str),
-    SingleQuote,
-    StartTagEmpty,
-    StartTagEnd,
-    StartTagStart(&'a str),
+    /// `SYSTEM "PubidLiteral"`
     SystemLiteral(&'a str),
+    /// `([^%&"] | PEReference | Reference)*`
+    EntityValue(&'a str),
+
+    // === Element ===
+    /// `<`
+    OpenTagStart,
+    /// `</`
+    TagEndStart,
+    /// `/>`
+    EmptyTagEnd,
+    /// `>`
+    TagEnd,
+    /// Text between single or double quotes
+    AttributeValue(&'a str),
+
+    // === misc ===
+    /// Text inside `content`, also used as the fallback when parsing unexpected characters
+    CharData(&'a str),
+    /// Reference Start
+    Percent,
+    /// Reference End
+    SemiColon,
+    /// Text between `<!--` and `-->`
+    Comment(&'a str),
+    /// `=`
+    Equal,
+    /// `Name` or `QName`
+    Name(&'a str),
+    /// `<?`
+    ProcessingInstructionStart,
+    /// `?>`
+    ProcessingInstructionEnd,
+    /// `'`
+    SingleQuote,
+    /// `"`
+    DoubleQuote,
+    /// space, tab, newline, or carriage return
     Whitespace(&'a str),
+    /// End of File
+    Eof,
 }
 
 impl<'a> Debug for TokenKind<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AttributeValue(value) => write!(f, "AttributeValue(\"{value}\")"),
-            Self::CharData(char_data) => write!(f, "CharData(\"{char_data}\")"),
-            Self::Comment(comment) => write!(f, "Comment(\"{comment}\")"),
             Self::DTDEnd => write!(f, "DocTypeDeclEnd"),
             Self::DTDStart => write!(f, "DocTypeDeclStart"),
-            Self::DoubleQuote => write!(f, "DoubleQuote"),
-            Self::EndTag(qname) => write!(f, "EndTag(\"{qname}\")"),
-            Self::Eof => write!(f, "Eof"),
+            Self::IntSubsetStart => write!(f, "IntSubsetStart"),
+            Self::IntSubsetEnd => write!(f, "IntSubsetEnd"),
+            Self::MarkupDeclStart => write!(f, "MarkupDeclStart"),
+            Self::MarkupDeclEnd => write!(f, "MarkupDeclEnd"),
+            Self::CDStart => write!(f, "MarkupDeclStart"),
+            Self::CDEnd => write!(f, "MarkupDeclEnd"),
+            Self::EntityDecl => write!(f, "EntityDecl"),
+            Self::AttlistDecl => write!(f, "AttlistDecl"),
+            Self::GEDecl => write!(f, "GEDecl"),
+            Self::PEDecl => write!(f, "PEDecl"),
+            Self::NData => write!(f, "NDATA"),
+            Self::PubidLiteral(pubid_literal) => write!(f, "PubidLiteral(\"{pubid_literal}\")"),
+            Self::SystemLiteral(system_literal) => write!(f, "SystemLiteral(\"{system_literal}\")"),
+            Self::EntityValue(value) => write!(f, "EntityValue(\"{value}\")"),
+            TokenKind::OpenTagStart => write!(f, "OpenTagStart"),
+            TokenKind::TagEndStart => write!(f, "TagEndStart"),
+            TokenKind::EmptyTagEnd => write!(f, "EmptyTagEnd"),
+            TokenKind::TagEnd => write!(f, "TagEnd"),
+            Self::AttributeValue(value) => write!(f, "AttributeValue(\"{value}\")"),
+            Self::CharData(char_data) => write!(f, "CharData(\"{}\")", char_data.replace("\n", "")),
+            Self::Percent => write!(f, "Percent"),
+            Self::SemiColon => write!(f, "SemiColon"),
+            Self::Comment(comment) => write!(f, "Comment(\"{comment}\")"),
             Self::Equal => write!(f, "Equal"),
             Self::Name(name) => write!(f, "Name(\"{name}\")"),
-            Self::Placeholder(arg0) => f.debug_tuple("Placeholder").field(arg0).finish(),
-            Self::ProcessingInstructionEnd => write!(f, "ProcessingInstructionEnd"),
             Self::ProcessingInstructionStart => write!(f, "ProcessingInstructionStart"),
-            Self::PubidLiteral(pubid_literal) => write!(f, "PubidLiteral(\"{pubid_literal}\")"),
+            Self::ProcessingInstructionEnd => write!(f, "ProcessingInstructionEnd"),
             Self::SingleQuote => write!(f, "SingleQuote"),
-            Self::StartTagEmpty => write!(f, "StartTagEmpty"),
-            Self::StartTagEnd => write!(f, "StartTagEnd"),
-            Self::StartTagStart(qname) => write!(f, "StartTag(\"{qname}\")"),
-            Self::SystemLiteral(system_literal) => write!(f, "SystemLiteral(\"{system_literal}\")"),
+            Self::DoubleQuote => write!(f, "DoubleQuote"),
             Self::Whitespace(_) => write!(f, "Whitespace"),
+            Self::Eof => write!(f, "Eof"),
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum AttType {
+    String,
+    Tokenized(TokenizedType),
+    // Enumerated(EnumeratedType),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum TokenizedType {
+    Id,
+    IdRef,
+    IdRefs,
+    Entity,
+    Entities,
+    NmToken,
+    NmTokens,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -114,27 +194,27 @@ impl<'a> InputStream<'a> {
 
         Some(self.source.as_bytes()[self.pos])
     }
+}
 
-    fn consume_whitespace(&mut self) {
-        let offset = self.pos;
-        while matches!(self.current_byte(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
-            self.advance(1);
-        }
+pub fn tokenize<'a>(mut stream: InputStream<'a>) -> Vec<Token<'a>> {
+    chomp_document(&mut stream);
+    stream.push_token(TokenKind::Eof, stream.pos);
+    stream.tokens
+}
 
-        if offset != self.pos {
-            self.push_token(TokenKind::Whitespace(self.slice_from(offset)), offset);
-        }
+fn chomp_whitespace<'a>(stream: &mut InputStream<'a>) {
+    let offset = stream.pos;
+    while matches!(stream.current_byte(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+        stream.advance(1);
+    }
+
+    if offset != stream.pos {
+        stream.push_token(TokenKind::Whitespace(stream.slice_from(offset)), offset);
     }
 }
 
-pub fn tokenize<'a>(mut stream: InputStream<'a>) -> ParseResult<Vec<Token<'a>>> {
-    parse_document(&mut stream)?;
-    stream.push_token(TokenKind::Eof, stream.pos);
-    Ok(stream.tokens)
-}
-
-fn parse_name<'a>(stream: &mut InputStream<'a>) -> &'a str {
-    let start = stream.pos;
+fn chomp_name<'a>(stream: &mut InputStream<'a>) {
+    let offset = stream.pos;
 
     while let Some(current) = stream.current_byte() {
         if !validate::is_name_char_u8(current) {
@@ -143,44 +223,69 @@ fn parse_name<'a>(stream: &mut InputStream<'a>) -> &'a str {
         stream.advance(1);
     }
 
-    stream.slice_from(start)
+    let name = stream.slice_from(offset);
+    stream.push_token(TokenKind::Name(name), offset);
 }
 
 /// Parses the source input, emitting a stream of tokens to build up the
 /// resulting `Document`
 ///
 /// [1] Document  ::=  prolog element Misc*
-fn parse_document<'a>(stream: &mut InputStream<'a>) -> ParseResult<()> {
-    parse_prolog(stream)?;
+fn chomp_document<'a>(stream: &mut InputStream<'a>) {
+    chomp_prolog(stream);
 
     // Parse any comments, PIs, or whitespace before the root element
     while let Some(b) = stream.current_byte() {
         match b {
-            b' ' | b'\t' | b'\n' | b'\r' => stream.consume_whitespace(),
+            b' ' | b'\t' | b'\n' | b'\r' => chomp_whitespace(stream),
             b'<' if stream.starts_with("<?") => {
-                parse_processing_instruction(stream);
+                chomp_processing_instruction(stream);
             }
             b'<' if stream.starts_with("<!--") => {
-                parse_comment(stream);
+                chomp_comment(stream);
             }
             // Start of the root node, break and parse outside of the loop.
             b'<' => break,
             _ => {
-                // Lexical Error or break and catch with syntax pass?
-                break;
+                // This path is not considered well-formed, we will let the Parser handle any
+                // errors originating from here.
+                chomp_chardata(stream);
             }
         }
     }
 
-    stream.consume_whitespace();
-    parse_element(stream);
-    parse_misc(stream)?;
+    chomp_whitespace(stream);
+    chomp_element(stream);
+    chomp_misc(stream);
+}
 
-    Ok(())
+/// [9] EntityValue  ::=  '"' ([^%&"] | PEReference | Reference)* '"' |  "'" ([^%&'] | PEReference | Reference)* "'"
+fn chomp_entity_value<'a>(stream: &mut InputStream<'a>) {
+    let (delimiter, kind) = match stream.current_byte() {
+        Some(sq @ b'\'') => (sq, TokenKind::SingleQuote),
+        Some(dq @ b'"') => (dq, TokenKind::DoubleQuote),
+        Some(_) | None => return,
+    };
+
+    stream.push_token(kind, stream.pos);
+    stream.advance(1);
+
+    let offset = stream.pos;
+    loop {
+        match stream.current_byte() {
+            None => return,
+            Some(b) if b == delimiter => break,
+            Some(_) => stream.advance(1),
+        }
+    }
+
+    stream.push_token(TokenKind::EntityValue(stream.slice_from(offset)), offset);
+    stream.push_token(kind, stream.pos);
+    stream.advance(1);
 }
 
 /// [10]  AttValue  ::=  '"' ([^<&"] | Reference)* '"' |  "'" ([^<&'] | Reference)* "'"
-fn parse_attribute_value<'a>(stream: &mut InputStream<'a>) {
+fn chomp_attribute_value<'a>(stream: &mut InputStream<'a>) {
     // We only enter this method if we encounter a single or double quote.
     let delimiter = stream.current_byte().expect("single or double quote");
     let kind = if delimiter == b'"' {
@@ -207,7 +312,7 @@ fn parse_attribute_value<'a>(stream: &mut InputStream<'a>) {
 }
 
 // [11] SystemLiteral  ::=  ('"' [^"]* '"') | ("'" [^']* "'")
-fn parse_system_literal<'a>(stream: &mut InputStream<'a>) {
+fn chomp_system_literal<'a>(stream: &mut InputStream<'a>) {
     let (delimiter, kind) = match stream.current_byte() {
         Some(sq @ b'\'') => (sq, TokenKind::SingleQuote),
         Some(dq @ b'"') => (dq, TokenKind::DoubleQuote),
@@ -234,7 +339,7 @@ fn parse_system_literal<'a>(stream: &mut InputStream<'a>) {
 
 // [12] PubidLiteral  ::=  '"' PubidChar* '"' | "'" (PubidChar - "'")* "'"
 // [13] PubidChar     ::=  #x20 | #xD | #xA | [a-zA-Z0-9] | [-'()+,./:=?;!*#@$_%]
-fn parse_public_id_literal<'a>(stream: &mut InputStream<'a>) {
+fn chomp_public_id_literal<'a>(stream: &mut InputStream<'a>) {
     let (delimiter, kind) = match stream.current_byte() {
         Some(sq @ b'\'') => (sq, TokenKind::SingleQuote),
         Some(dq @ b'"') => (dq, TokenKind::DoubleQuote),
@@ -258,7 +363,7 @@ fn parse_public_id_literal<'a>(stream: &mut InputStream<'a>) {
 }
 
 /// [14]  CharData  ::=  [^<&]* - ([^<&]* ']]>' [^<&]*)
-fn parse_chardata<'a>(stream: &mut InputStream<'a>) {
+fn chomp_chardata<'a>(stream: &mut InputStream<'a>) {
     let offset = stream.pos;
     loop {
         match stream.current_byte() {
@@ -273,7 +378,7 @@ fn parse_chardata<'a>(stream: &mut InputStream<'a>) {
 }
 
 /// [15]  Comment  ::=  '<!--' ((Char - '-') | ('-' (Char - '-')))* '-->'
-fn parse_comment<'a>(stream: &mut InputStream<'a>) {
+fn chomp_comment<'a>(stream: &mut InputStream<'a>) {
     stream.advance(4);
 
     let offset = stream.pos;
@@ -292,15 +397,14 @@ fn parse_comment<'a>(stream: &mut InputStream<'a>) {
 
 // [16] PI        ::=   '<?' PITarget  (S (Char* - ( Char* '?>' Char*)))? '?>'
 // [17] PITarget  ::=   Name - (('X' | 'x') ('M' | 'm') ('L' | 'l'))
-fn parse_processing_instruction<'a>(stream: &mut InputStream<'a>) {
+fn chomp_processing_instruction<'a>(stream: &mut InputStream<'a>) {
     let offset = stream.pos;
 
     stream.push_token(TokenKind::ProcessingInstructionStart, offset);
     stream.advance(2);
 
-    let target = parse_name(stream);
-    stream.push_token(TokenKind::Name(target), offset);
-    stream.consume_whitespace();
+    chomp_name(stream);
+    chomp_whitespace(stream);
 
     let offset = stream.pos;
     loop {
@@ -316,22 +420,40 @@ fn parse_processing_instruction<'a>(stream: &mut InputStream<'a>) {
     stream.advance(2);
 }
 
+/// [18] CDSect   ::=  CDStart CData CDEnd
+/// [19] CDStart  ::=  '<![CDATA['
+/// [20] CData    ::=  (Char* - (Char* ']]>' Char*))
+/// [21] CDEnd    ::=  ']]>'
+fn chomp_cdata<'a>(stream: &mut InputStream<'a>) {
+    stream.push_token(TokenKind::CDStart, stream.pos);
+    stream.advance(9);
+
+    loop {
+        match stream.current_byte() {
+            None => return,
+            Some(b']') if stream.starts_with("]]>") => break,
+            Some(_) => stream.advance(1),
+        }
+    }
+
+    stream.push_token(TokenKind::CDEnd, stream.pos);
+    stream.advance(3);
+}
+
 /// [22] prolog  ::=  XMLDecl? Misc* (doctypedecl Misc*)?
-fn parse_prolog<'a>(stream: &mut InputStream<'a>) -> ParseResult<()> {
+fn chomp_prolog<'a>(stream: &mut InputStream<'a>) {
     // There can only be one XML declaration, and it must be at the absolute start
     // of the Document, i.e., no characters are allowed before it (including whitespace)
     if stream.starts_with("<?xml") {
-        parse_xml_decl(stream);
+        chomp_xml_decl(stream);
     }
 
-    parse_misc(stream)?;
+    chomp_misc(stream);
 
     if stream.starts_with("<!DOCTYPE") {
-        parse_doc_type_decl(stream);
-        parse_misc(stream)?;
+        chomp_doc_type_decl(stream);
+        chomp_misc(stream);
     }
-
-    Ok(())
 }
 
 /// [23] XMLDecl       ::=   '<?xml' VersionInfo EncodingDecl? SDDecl? S? '?>'
@@ -341,248 +463,313 @@ fn parse_prolog<'a>(stream: &mut InputStream<'a>) -> ParseResult<()> {
 /// [80] EncodingDecl  ::=   S 'encoding' Eq ('"' EncName '"' | "'" EncName "'" )
 /// [81] EncName       ::=   [A-Za-z] ([A-Za-z0-9._] | '-')* /* Encoding name contains only Latin characters */
 /// [32] SDDecl        ::=   S 'standalone' Eq (("'" ('yes' | 'no') "'") | ('"' ('yes' | 'no') '"'))
-fn parse_xml_decl<'a>(stream: &mut InputStream<'a>) {
+fn chomp_xml_decl<'a>(stream: &mut InputStream<'a>) {
+    // TODO: Should this be its own token/token sequence to make parsing a bit easier?
     stream.advance(2);
-
-    let mut offset = stream.pos;
-    stream.push_token(TokenKind::ProcessingInstructionStart, offset);
-
-    offset = stream.pos;
-    let pi_target = parse_name(stream);
-    stream.push_token(TokenKind::Name(pi_target), offset);
+    stream.push_token(TokenKind::ProcessingInstructionStart, stream.pos);
+    chomp_name(stream);
 
     loop {
-        stream.consume_whitespace();
+        chomp_whitespace(stream);
         match stream.current_byte() {
             None => break,
             Some(b'"' | b'\'') => {
-                parse_attribute_value(stream);
+                chomp_attribute_value(stream);
             }
             Some(b'=') => {
-                offset = stream.pos;
-                stream.push_token(TokenKind::Equal, offset);
+                stream.push_token(TokenKind::Equal, stream.pos);
                 stream.advance(1);
             }
             Some(b'?') if stream.starts_with("?>") => {
-                stream.push_token(TokenKind::ProcessingInstructionEnd, offset);
+                stream.push_token(TokenKind::ProcessingInstructionEnd, stream.pos);
                 stream.advance(2);
                 break;
             }
             Some(_) => {
-                offset = stream.pos;
-                let name = parse_name(stream);
-                stream.push_token(TokenKind::Name(name), offset);
+                chomp_name(stream);
             }
         }
     }
 }
 
 /// [27] Misc  ::=  Comment | PI | S
-fn parse_misc<'a>(stream: &mut InputStream<'a>) -> ParseResult<()> {
+fn chomp_misc<'a>(stream: &mut InputStream<'a>) {
     loop {
+        chomp_whitespace(stream);
         match stream.current_byte() {
-            None => break,
-            Some(b' ' | b'\t' | b'\n' | b'\r') => stream.consume_whitespace(),
             Some(b'<') if stream.starts_with("<?") => {
-                parse_processing_instruction(stream);
+                chomp_processing_instruction(stream);
             }
             Some(b'<') if stream.starts_with("<!--") => {
-                parse_comment(stream);
+                chomp_comment(stream);
             }
-            Some(_) => break,
+            None | Some(_) => break,
         }
     }
-
-    Ok(())
 }
 
 /// [28]  doctypedecl ::=   '<!DOCTYPE' S Name (S ExternalID)? S? ('[' intSubset ']' S?)? '>'
-/// [28a] DeclSep     ::=   PEReference | S [WFC: PE Between Declarations]
+/// [28a] DeclSep     ::=   PEReference | S
 /// [28b] intSubset   ::=   (markupdecl | DeclSep)*
 /// [29]  markupdecl  ::=   elementdecl | AttlistDecl | EntityDecl | NotationDecl | PI | Comment
-fn parse_doc_type_decl<'a>(stream: &mut InputStream<'a>) {
+fn chomp_doc_type_decl<'a>(stream: &mut InputStream<'a>) {
+    stream.push_token(TokenKind::DTDStart, stream.pos);
     stream.advance(9);
-    stream.consume_whitespace();
+    chomp_whitespace(stream);
 
-    let offset = stream.pos;
-    let name = parse_name(stream);
-    stream.push_token(TokenKind::Name(name), offset);
+    chomp_name(stream);
 
     // optional
-    parse_external_id(stream);
+    chomp_external_id(stream);
 
     // intSubset
     if stream.starts_with("[") {
-        stream.consume_whitespace();
+        stream.push_token(TokenKind::IntSubsetStart, stream.pos);
+        stream.advance(1);
+        chomp_whitespace(stream);
         loop {
             match stream.current_byte() {
-                None => break,
-                Some(b']') => break,
-                Some(b'<') if stream.starts_with("<!ELEMENT") => parse_element_type_decl(stream),
-                Some(b'<') if stream.starts_with("<!ENTITY") => parse_entity_decl(stream),
-                Some(b'<') if stream.starts_with("<!ATTLIST") => parse_attlist_decl(stream),
-                Some(b'<') if stream.starts_with("<!NOTATION") => parse_notation_decl(stream),
-                Some(b'<') if stream.starts_with("<?") => parse_processing_instruction(stream),
-                Some(b'<') if stream.starts_with("<!--") => parse_comment(stream),
-                Some(_) => {
-                    // Lexical Error or break and catch with syntax pass?
+                None => return,
+                Some(b'<') if stream.starts_with("<!ELEMENT") => chomp_element_type_decl(stream),
+                Some(b'<') if stream.starts_with("<!ENTITY") => chomp_entity_decl(stream),
+                Some(b'<') if stream.starts_with("<!ATTLIST") => chomp_attlist_decl(stream),
+                Some(b'<') if stream.starts_with("<!NOTATION") => chomp_notation_decl(stream),
+                Some(b'<') if stream.starts_with("<?") => chomp_processing_instruction(stream),
+                Some(b'<') if stream.starts_with("<!--") => chomp_comment(stream),
+                Some(b']') => {
+                    stream.push_token(TokenKind::IntSubsetEnd, stream.pos);
+                    stream.advance(1);
                     break;
+                }
+                Some(b'%') => {
+                    stream.advance(1);
+                    stream.push_token(TokenKind::Percent, stream.pos);
+                    chomp_name(stream);
+                }
+                Some(b';') => {
+                    stream.advance(1);
+                    stream.push_token(TokenKind::SemiColon, stream.pos);
+                }
+                Some(b'>') => {
+                    stream.push_token(TokenKind::MarkupDeclEnd, stream.pos);
+                    stream.advance(1);
+                    chomp_whitespace(stream);
+                }
+                Some(_) => {
+                    chomp_chardata(stream);
                 }
             }
         }
     }
 
-    stream.advance(1);
-    stream.consume_whitespace();
+    chomp_whitespace(stream);
     if stream.starts_with(">") {
+        stream.advance(1);
         stream.push_token(TokenKind::DTDEnd, stream.pos);
     }
 }
 
 /// [39] element  ::=  EmptyElemTag | STag content ETag
-fn parse_element<'a>(stream: &mut InputStream<'a>) {
-    parse_element_start(stream);
-    parse_content(stream);
-    parse_etag(stream);
+fn chomp_element<'a>(stream: &mut InputStream<'a>) {
+    if chomp_element_start(stream) {
+        chomp_content(stream);
+        chomp_etag(stream);
+    }
 }
 
 /// [40] STag          ::= '<' QName (S Attribute)* S? '>'
 /// [44] EmptyElemTag  ::= '<' QName (S Attribute)* S? '/>'
-fn parse_element_start<'a>(stream: &mut InputStream<'a>) {
-    let offset = stream.pos;
+fn chomp_element_start<'a>(stream: &mut InputStream<'a>) -> bool {
+    stream.push_token(TokenKind::OpenTagStart, stream.pos);
     stream.advance(1);
-    stream.consume_whitespace();
-    let name = parse_name(stream);
-    stream.push_token(TokenKind::StartTagStart(name), offset);
+    chomp_whitespace(stream);
+    chomp_name(stream);
 
-    loop {
-        stream.consume_whitespace();
+    let has_content = loop {
+        chomp_whitespace(stream);
         let offset = stream.pos;
         match stream.current_byte() {
-            None => return,
+            None => break false,
             Some(b'>') => {
-                stream.push_token(TokenKind::StartTagEnd, offset);
+                stream.push_token(TokenKind::TagEnd, offset);
                 stream.advance(1);
-                break;
+                break true;
             }
             Some(b'/') if stream.starts_with("/>") => {
-                stream.push_token(TokenKind::StartTagEmpty, offset);
+                stream.push_token(TokenKind::EmptyTagEnd, offset);
                 stream.advance(2);
-                break;
+                break false;
             }
             Some(b'=') => {
                 stream.push_token(TokenKind::Equal, offset);
                 stream.advance(1);
             }
             Some(b'"' | b'\'') => {
-                parse_attribute_value(stream);
+                chomp_attribute_value(stream);
             }
             Some(_) => {
-                let name = parse_name(stream);
-                stream.push_token(TokenKind::Name(name), offset);
+                chomp_name(stream);
             }
         }
-    }
+    };
+
+    has_content
 }
 
 // [43] content  ::=  CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
-fn parse_content<'a>(stream: &mut InputStream<'a>) {
+fn chomp_content<'a>(stream: &mut InputStream<'a>) {
     loop {
-        stream.consume_whitespace();
         match stream.current_byte() {
-            None => break,
+            None => return,
             Some(b'<') if stream.starts_with("</") => break,
-            Some(b'<') if stream.starts_with("<?") => parse_processing_instruction(stream),
-            Some(b'<') if stream.starts_with("<![CDATA[") => unimplemented!("CDATA"),
-            Some(b'<') if stream.starts_with("<!--") => parse_comment(stream),
-            Some(b'<') => parse_element(stream),
+            Some(b'<') if stream.starts_with("<?") => chomp_processing_instruction(stream),
+            Some(b'<') if stream.starts_with("<![CDATA[") => chomp_cdata(stream),
+            Some(b'<') if stream.starts_with("<!--") => chomp_comment(stream),
+            Some(b'<') => chomp_element(stream),
             Some(b'&') => unimplemented!("reference"),
-            Some(_) => parse_chardata(stream),
+            Some(_) => chomp_chardata(stream),
         }
     }
 }
 
 /// [42]  ETag  ::=  '</' Name S? '>'
-fn parse_etag<'a>(stream: &mut InputStream<'a>) {
+fn chomp_etag<'a>(stream: &mut InputStream<'a>) {
+    stream.push_token(TokenKind::TagEndStart, stream.pos);
     stream.advance(2);
-    stream.consume_whitespace();
+    chomp_whitespace(stream);
+    chomp_name(stream);
+    chomp_whitespace(stream);
 
-    let offset = stream.pos;
-    loop {
-        match stream.current_byte() {
-            None => return,
-            Some(b'>') => break,
-            Some(_) => stream.advance(1),
-        }
+    if let Some(b'>') = stream.current_byte() {
+        stream.push_token(TokenKind::TagEnd, stream.pos);
+        stream.advance(1);
     }
-    let qname = stream.slice_from(offset);
-    stream.push_token(TokenKind::EndTag(qname), offset);
-    stream.advance(1);
 }
 
 // [45] elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
 // [46] contentspec  ::=  'EMPTY' | 'ANY' | Mixed | children
-fn parse_element_type_decl<'a>(stream: &mut InputStream<'a>) {
+fn chomp_element_type_decl<'a>(stream: &mut InputStream<'a>) {
+    stream.push_token(TokenKind::MarkupDeclStart, stream.pos);
     stream.advance(9);
-    stream.consume_whitespace();
+    chomp_whitespace(stream);
     unimplemented!("element type decl")
 }
 
 // [52] AttlistDecl  ::=  '<!ATTLIST' S Name AttDef* S? '>'
-fn parse_attlist_decl<'a>(stream: &mut InputStream<'a>) {
+fn chomp_attlist_decl<'a>(stream: &mut InputStream<'a>) {
+    stream.push_token(TokenKind::MarkupDeclStart, stream.pos);
+    stream.push_token(TokenKind::AttlistDecl, stream.pos);
     stream.advance(9);
-    unimplemented!("attlist decl")
+    chomp_whitespace(stream);
+    chomp_name(stream);
+    chomp_att_def(stream);
+    chomp_whitespace(stream);
 }
 
-// [53] AttDef         ::=  S Name S AttType S DefaultDecl
-// [54] AttType        ::=  StringType | TokenizedType | EnumeratedType
-// [55] StringType     ::=  'CDATA'
-// [56] TokenizedType  ::=  'ID'
-//                     | 'IDREF'
-//                     | 'IDREFS'
-//                     | 'ENTITY'
-//                     | 'ENTITIES'
-//                     | 'NMTOKEN'
-//                     | 'NMTOKENS'
-fn parse_att_def<'a>(stream: &mut InputStream<'a>) {
+/// [53] AttDef         ::=  S Name S AttType S DefaultDecl
+/// [55] StringType     ::=  'CDATA'
+/// [56] TokenizedType  ::=  'ID'
+///                     | 'IDREF'
+///                     | 'IDREFS'
+///                     | 'ENTITY'
+///                     | 'ENTITIES'
+///                     | 'NMTOKEN'
+///                     | 'NMTOKENS'
+fn chomp_att_def<'a>(stream: &mut InputStream<'a>) {
+    chomp_whitespace(stream);
+    chomp_name(stream);
+    chomp_att_type(stream);
+    chomp_whitespace(stream);
     unimplemented!("att def")
 }
+
+/// [54] AttType  ::=  StringType | TokenizedType | EnumeratedType
+fn chomp_att_type<'a>(stream: &mut InputStream<'a>) {}
 
 // [70] EntityDecl  ::=  GEDecl | PEDecl
 // [71] GEDecl      ::=  '<!ENTITY' S Name S EntityDef S? '>'
 // [72] PEDecl      ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
-fn parse_entity_decl<'a>(stream: &mut InputStream<'a>) {
-    unimplemented!("entity decl")
+fn chomp_entity_decl<'a>(stream: &mut InputStream<'a>) {
+    stream.push_token(TokenKind::MarkupDeclStart, stream.pos);
+    stream.push_token(TokenKind::EntityDecl, stream.pos);
+    stream.advance(8);
+
+    if let Some(b'%') = stream.current_byte() {
+        stream.push_token(TokenKind::PEDecl, stream.pos);
+        chomp_whitespace(stream);
+        chomp_pe_def(stream);
+    } else {
+        stream.push_token(TokenKind::GEDecl, stream.pos);
+        chomp_whitespace(stream);
+        chomp_name(stream);
+        chomp_whitespace(stream);
+        chomp_entity_def(stream);
+    }
+}
+
+/// [73] EntityDef   ::=  EntityValue | (ExternalID NDataDecl?)
+fn chomp_entity_def<'a>(stream: &mut InputStream<'a>) {
+    if let Some(b'\'' | b'"') = stream.current_byte() {
+        chomp_entity_value(stream);
+    } else {
+        chomp_external_id(stream);
+        chomp_ndata_decl(stream);
+    }
+}
+
+/// [74]  PEDef  ::=  EntityValue | ExternalID
+fn chomp_pe_def<'a>(stream: &mut InputStream<'a>) {
+    stream.advance(1);
+
+    chomp_whitespace(stream);
+    chomp_name(stream);
+    chomp_whitespace(stream);
+
+    if let Some(b'\'' | b'"') = stream.current_byte() {
+        chomp_entity_value(stream);
+    } else {
+        chomp_external_id(stream)
+    }
+
+    chomp_whitespace(stream);
 }
 
 // [75] ExternalID  ::=  'SYSTEM' S SystemLiteral | 'PUBLIC' S PubidLiteral S SystemLiteral
-fn parse_external_id<'a>(stream: &mut InputStream<'a>) {
-    stream.consume_whitespace();
+fn chomp_external_id<'a>(stream: &mut InputStream<'a>) {
+    chomp_whitespace(stream);
 
     if stream.starts_with("SYSTEM") {
         stream.advance(6);
-        stream.consume_whitespace();
+        chomp_whitespace(stream);
 
-        parse_system_literal(stream);
-        // return Ok(Some((system_literal, None)));
+        chomp_system_literal(stream);
     }
 
     if stream.starts_with("PUBLIC") {
         stream.advance(6);
-        stream.consume_whitespace();
+        chomp_whitespace(stream);
 
-        parse_public_id_literal(stream);
-        stream.consume_whitespace();
-        parse_system_literal(stream);
+        chomp_public_id_literal(stream);
+        chomp_whitespace(stream);
+        chomp_system_literal(stream);
+    }
+}
 
-        // return Ok(Some((system_literal, Some(pub_id_literal))));
+/// [76] NDataDecl  ::=  S 'NDATA' S Name
+fn chomp_ndata_decl<'a>(stream: &mut InputStream<'a>) {
+    chomp_whitespace(stream);
+
+    if stream.starts_with("NDATA") {
+        stream.push_token(TokenKind::NData, stream.pos);
+        stream.advance(5);
+        chomp_whitespace(stream);
+        chomp_name(stream);
     }
 }
 
 // [82] NotationDecl  ::=  '<!NOTATION' S Name S (ExternalID | PublicID) S? '>'
 // [83] PublicID      ::=  'PUBLIC' S PubidLiteral
-//
-// Validity constraint: Unique Notation Name
-fn parse_notation_decl<'a>(stream: &mut InputStream<'a>) {
+fn chomp_notation_decl<'a>(stream: &mut InputStream<'a>) {
+    stream.push_token(TokenKind::MarkupDeclStart, stream.pos);
     unimplemented!("notation decl")
 }
