@@ -4,6 +4,10 @@ use crate::validate;
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum TokenKind<'a> {
+    /// <?xml
+    XmlDeclStart,
+    /// ?>
+    XmlDeclEnd,
     /// `<!DOCTYPE`
     DTDStart,
     /// `>`
@@ -32,10 +36,12 @@ pub enum TokenKind<'a> {
     PEDecl,
     /// `NDATA`
     NData,
-    /// `PUBLIC "PubidLiteral"`
-    PubidLiteral(&'a str),
-    /// `SYSTEM "PubidLiteral"`
-    SystemLiteral(&'a str),
+    /// `PUBLIC`
+    Public,
+    /// `SYSTEM`
+    System,
+    /// `"text between quotes"`
+    Literal(&'a str),
     /// `([^%&"] | PEReference | Reference)*`
     EntityValue(&'a str),
 
@@ -73,9 +79,9 @@ pub enum TokenKind<'a> {
     /// `Name` or `QName`
     Name(&'a str),
     /// `<?`
-    ProcessingInstructionStart,
+    PIStart,
     /// `?>`
-    ProcessingInstructionEnd,
+    PIEnd,
     /// `'`
     SingleQuote,
     /// `"`
@@ -89,6 +95,8 @@ pub enum TokenKind<'a> {
 impl<'a> Debug for TokenKind<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::XmlDeclStart => write!(f, "XmlDeclStart"),
+            Self::XmlDeclEnd => write!(f, "XmlDeclEnd"),
             Self::DTDEnd => write!(f, "DocTypeDeclEnd"),
             Self::DTDStart => write!(f, "DocTypeDeclStart"),
             Self::IntSubsetStart => write!(f, "IntSubsetStart"),
@@ -102,16 +110,17 @@ impl<'a> Debug for TokenKind<'a> {
             Self::GEDecl => write!(f, "GEDecl"),
             Self::PEDecl => write!(f, "PEDecl"),
             Self::NData => write!(f, "NDATA"),
-            Self::PubidLiteral(pubid_literal) => write!(f, "PubidLiteral(\"{pubid_literal}\")"),
-            Self::SystemLiteral(system_literal) => write!(f, "SystemLiteral(\"{system_literal}\")"),
+            Self::Public => write!(f, "Public"),
+            Self::System => write!(f, "System"),
+            Self::Literal(literal) => write!(f, "Literal(\"{literal}\")"),
             Self::EntityValue(value) => write!(f, "EntityValue(\"{value}\")"),
             Self::StringType => write!(f, "StringType(CDATA)"),
             Self::TokenizedType(tokenized_type) => write!(f, "TokenizedType(\"{tokenized_type:?}\")"),
             Self::EnumeratedType => write!(f, "EnumeratedType"),
-            TokenKind::OpenTagStart => write!(f, "OpenTagStart"),
-            TokenKind::TagEndStart => write!(f, "TagEndStart"),
-            TokenKind::EmptyTagEnd => write!(f, "EmptyTagEnd"),
-            TokenKind::TagEnd => write!(f, "TagEnd"),
+            Self::OpenTagStart => write!(f, "OpenTagStart"),
+            Self::TagEndStart => write!(f, "TagEndStart"),
+            Self::EmptyTagEnd => write!(f, "EmptyTagEnd"),
+            Self::TagEnd => write!(f, "TagEnd"),
             Self::AttributeValue(value) => write!(f, "AttributeValue(\"{value}\")"),
             Self::CharData(char_data) => write!(f, "CharData(\"{}\")", char_data.replace("\n", "")),
             Self::Percent => write!(f, "Percent"),
@@ -119,8 +128,8 @@ impl<'a> Debug for TokenKind<'a> {
             Self::Comment(comment) => write!(f, "Comment(\"{comment}\")"),
             Self::Equal => write!(f, "Equal"),
             Self::Name(name) => write!(f, "Name(\"{name}\")"),
-            Self::ProcessingInstructionStart => write!(f, "ProcessingInstructionStart"),
-            Self::ProcessingInstructionEnd => write!(f, "ProcessingInstructionEnd"),
+            Self::PIStart => write!(f, "PIStart"),
+            Self::PIEnd => write!(f, "PIEnd"),
             Self::SingleQuote => write!(f, "SingleQuote"),
             Self::DoubleQuote => write!(f, "DoubleQuote"),
             Self::Whitespace(_) => write!(f, "Whitespace"),
@@ -152,10 +161,30 @@ impl<'a> Token<'a> {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq)]
+enum State {
+    Idle,
+    XmlDecl,
+    PI(bool),
+    Dtd,
+    IntSubset,
+    ExternalId,
+    AttlistDecl,
+    AttDef,
+    EntityDecl,
+    EntityDef,
+    PEDef,
+    NDataDecl,
+    Comment,
+    ElementStart,
+}
+
 pub struct InputStream<'a> {
     source: &'a str,
     pos: usize,
     tokens: Vec<Token<'a>>,
+    state: State,
+    prev_state: State,
 }
 
 impl<'a> InputStream<'a> {
@@ -164,8 +193,17 @@ impl<'a> InputStream<'a> {
             source,
             pos: 0,
             tokens: Vec::new(),
+            state: State::Idle,
+            prev_state: State::Idle,
         }
     }
+
+    fn set_state(&mut self, new_state: State) {
+        println!("set_state: {:?} -> {:?}", self.state, new_state);
+        self.prev_state = self.state;
+        self.state = new_state;
+    }
+
     fn advance(&mut self, amount: usize) {
         self.pos += amount;
     }
@@ -197,6 +235,354 @@ impl<'a> InputStream<'a> {
         }
 
         Some(self.source.as_bytes()[self.pos])
+    }
+
+    fn chomp(&mut self, kind: TokenKind<'a>, offset: usize) -> Option<Token<'a>> {
+        println!("    TokenKind::{:?}", kind);
+        Some(Token::new(kind, offset))
+    }
+
+    fn chomp_ws(&mut self) -> Option<Token<'a>> {
+        let offset = self.pos;
+
+        while let Some(b) = self.current_byte() {
+            if !self.is_ws(b) {
+                break;
+            }
+            self.advance(1);
+        }
+
+        self.chomp(TokenKind::Whitespace(self.slice_from(offset)), offset)
+    }
+
+    fn is_ws(&self, b: u8) -> bool {
+        matches!(b, 0x09 | 0x0A | 0x0D | 0x20)
+    }
+
+    fn chomp_name(&mut self) -> &'a str {
+        let offset = self.pos;
+
+        while let Some(b) = self.current_byte() {
+            if !validate::is_name_char_u8(b) {
+                break;
+            }
+            self.advance(1);
+        }
+
+        self.slice_from(offset)
+    }
+
+    fn chomp_until(&mut self, until: u8) -> &'a str {
+        let offset = self.pos;
+        while let Some(b) = self.current_byte()
+            && b != until
+        {
+            self.advance(1);
+        }
+
+        self.slice_from(offset)
+    }
+
+    fn chomp_literal(&mut self, quote: u8) -> Option<Token<'a>> {
+        let offset = self.pos;
+        self.advance(1);
+        let literal = self.chomp_until(quote);
+        self.advance(1);
+        self.chomp(TokenKind::Literal(literal), offset)
+    }
+}
+
+impl<'a> Iterator for InputStream<'a> {
+    type Item = Token<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.current_byte() {
+            None => None,
+            Some(b) => match self.state {
+                State::Idle => match b {
+                    b'<' if self.starts_with("<?xml") => {
+                        let offset = self.pos;
+                        self.advance(2);
+                        self.set_state(State::XmlDecl);
+                        self.chomp(TokenKind::XmlDeclStart, offset)
+                    }
+                    b'<' if self.starts_with("<?") => {
+                        let offset = self.pos;
+                        self.advance(2);
+                        self.set_state(State::PI(false));
+                        self.chomp(TokenKind::PIStart, offset)
+                    }
+                    b'<' if self.starts_with("<!--") => {
+                        self.set_state(State::Comment);
+                        self.next()
+                    }
+                    b'<' if self.starts_with("<!DOCTYPE") => {
+                        self.advance(9);
+                        self.set_state(State::Dtd);
+                        self.chomp(TokenKind::DTDStart, self.pos - 9)
+                    }
+                    b'<' => {
+                        self.set_state(State::ElementStart);
+                        self.next()
+                    }
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    _ => panic!("IDLE???"),
+                },
+                State::XmlDecl => match b {
+                    b'=' => {
+                        self.advance(1);
+                        self.chomp(TokenKind::Equal, self.pos - 1)
+                    }
+                    b'?' if self.starts_with("?>") => {
+                        let offset = self.pos;
+                        self.advance(2);
+                        self.set_state(State::Idle);
+                        self.chomp(TokenKind::XmlDeclEnd, offset)
+                    }
+                    q @ b'\'' | q @ b'"' => self.chomp_literal(q),
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name();
+                        self.chomp(TokenKind::Name(name), offset)
+                    }
+                },
+                State::Comment => {
+                    let offset = self.pos;
+                    self.advance(4);
+
+                    loop {
+                        match self.current_byte() {
+                            None => return None,
+                            Some(b'-') if self.starts_with("-->") => break,
+                            Some(_) => self.advance(1),
+                        }
+                    }
+
+                    let comment = self.slice_from(offset);
+                    self.advance(3);
+                    self.set_state(self.prev_state);
+                    self.chomp(TokenKind::Comment(comment), offset)
+                }
+                State::PI(target_chomped) => match b {
+                    b'?' if self.starts_with("?>") => {
+                        let offset = self.pos;
+                        self.advance(2);
+                        self.set_state(self.prev_state);
+                        self.chomp(TokenKind::PIEnd, offset)
+                    }
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    _ => {
+                        let offset = self.pos;
+                        while let Some(b) = self.current_byte() {
+                            match b {
+                                b if self.starts_with("?>") || self.is_ws(b) => break,
+                                _ => self.advance(1),
+                            }
+                        }
+
+                        let value = self.slice_from(offset);
+                        if target_chomped {
+                            self.chomp(TokenKind::CharData(value), offset)
+                        } else {
+                            self.state = State::PI(true);
+                            self.chomp(TokenKind::Name(value), offset)
+                        }
+                    }
+                },
+                State::Dtd => match b {
+                    b'>' => {
+                        let offset = self.pos;
+                        self.advance(1);
+                        self.set_state(State::Idle);
+                        self.chomp(TokenKind::DTDEnd, offset)
+                    }
+                    b'[' => {
+                        let offset = self.pos;
+                        self.advance(1);
+                        self.set_state(State::IntSubset);
+                        self.chomp(TokenKind::IntSubsetStart, offset)
+                    }
+                    b if self.starts_with("SYSTEM") || self.starts_with("PUBLIC") => {
+                        self.set_state(State::ExternalId);
+                        self.next()
+                    }
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name();
+                        self.chomp(TokenKind::Name(name), offset)
+                    }
+                },
+                State::ExternalId => match b {
+                    q @ b'\'' | q @ b'"' => self.chomp_literal(q),
+                    b if self.starts_with("SYSTEM") => {
+                        let offset = self.pos;
+                        self.advance(6);
+                        self.chomp(TokenKind::System, offset)
+                    }
+                    b if self.starts_with("PUBLIC") => {
+                        let offset = self.pos;
+                        self.advance(6);
+                        self.chomp(TokenKind::Public, offset)
+                    }
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    _ => {
+                        self.set_state(self.prev_state);
+                        self.next()
+                    }
+                },
+                State::IntSubset => match b {
+                    b'%' => {
+                        let offset = self.pos;
+                        self.advance(1);
+                        self.chomp(TokenKind::Percent, offset)
+                    }
+                    b';' => {
+                        let offset = self.pos;
+                        self.advance(1);
+                        self.chomp(TokenKind::SemiColon, offset)
+                    }
+                    b']' => {
+                        let offset = self.pos;
+                        self.advance(1);
+                        self.set_state(State::Dtd);
+                        self.chomp(TokenKind::IntSubsetEnd, offset)
+                    }
+                    // b if self.starts_with("<!ELEMENT") => chomp_element_type_decl(stream),
+                    b if self.starts_with("<!ENTITY") => {
+                        let offset = self.pos;
+                        self.advance(8);
+                        self.set_state(State::EntityDecl);
+                        self.chomp(TokenKind::EntityDecl, offset)
+                    }
+                    b if self.starts_with("<!ATTLIST") => {
+                        let offset = self.pos;
+                        self.advance(9);
+                        self.set_state(State::AttlistDecl);
+                        self.chomp(TokenKind::AttlistDecl, offset)
+                    }
+                    // b if self.starts_with("<!NOTATION") => chomp_notation_decl(stream),
+                    b if self.starts_with("<?") => {
+                        self.set_state(State::PI(false));
+                        self.next()
+                    }
+                    b if self.starts_with("<!--") => {
+                        self.set_state(State::Comment);
+                        self.next()
+                    }
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name();
+                        self.chomp(TokenKind::Name(name), offset)
+                    }
+                },
+                State::AttlistDecl => match b {
+                    b'#' => {
+                        // self.state = State::DefaultDecl;
+                        // self.next()
+                        unimplemented!("DefaultDecl in AttlistDecl")
+                    }
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name();
+                        self.state = State::AttDef;
+                        self.chomp(TokenKind::Name(name), offset)
+                    }
+                },
+                State::AttDef => {
+                    if self.starts_with("CDATA") {
+                        self.advance(5);
+                        self.chomp(TokenKind::StringType, self.pos - 5)
+                    } else if self.starts_with("ID") {
+                        self.advance(2);
+                        self.chomp(TokenKind::TokenizedType(TokenizedType::Id), self.pos - 2)
+                    } else if self.starts_with("IDREF") {
+                        self.advance(5);
+                        self.chomp(TokenKind::TokenizedType(TokenizedType::IdRef), self.pos - 5)
+                    } else if self.starts_with("IDREFS") {
+                        self.advance(6);
+                        self.chomp(TokenKind::TokenizedType(TokenizedType::IdRefs), self.pos - 6)
+                    } else if self.starts_with("ENTITY") {
+                        self.advance(6);
+                        self.chomp(TokenKind::TokenizedType(TokenizedType::Entity), self.pos - 6)
+                    } else if self.starts_with("ENTITIES") {
+                        self.advance(8);
+                        self.chomp(TokenKind::TokenizedType(TokenizedType::Entities), self.pos - 8)
+                    } else if self.starts_with("NMTOKEN") {
+                        self.advance(7);
+                        self.chomp(TokenKind::TokenizedType(TokenizedType::NmToken), self.pos - 7)
+                    } else if self.starts_with("NMTOKENS") {
+                        self.advance(8);
+                        self.chomp(TokenKind::TokenizedType(TokenizedType::NmTokens), self.pos - 8)
+                    } else {
+                        // self.state = State::EnumeratedType;
+                        // self.next()
+                        todo!("enumerated_type")
+                    }
+                }
+                State::EntityDecl => match b {
+                    b'>' => {
+                        let offset = self.pos;
+                        self.advance(1);
+                        self.set_state(State::IntSubset);
+                        self.chomp(TokenKind::MarkupDeclEnd, offset)
+                    }
+                    b'%' => {
+                        let offset = self.pos;
+                        self.advance(1);
+                        self.state = State::PEDef;
+                        self.chomp(TokenKind::PEDecl, offset)
+                    }
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name();
+                        self.state = State::EntityDef;
+                        self.chomp(TokenKind::Name(name), offset)
+                    }
+                },
+                State::PEDef => match b {
+                    q @ b'\'' | q @ b'"' => self.chomp_literal(q),
+                    _ => {
+                        self.state = State::ExternalId;
+                        self.next()
+                    }
+                },
+                State::EntityDef => match b {
+                    q @ b'\'' | q @ b'"' => self.chomp_literal(q),
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    b if self.starts_with("SYSTEM") || self.starts_with("PUBLIC") => {
+                        self.set_state(State::ExternalId);
+                        self.next()
+                    }
+                    b if self.starts_with("NDATA") => {
+                        let offset = self.pos;
+                        self.advance(5);
+                        self.prev_state = State::EntityDecl;
+                        self.state = State::NDataDecl;
+                        self.chomp(TokenKind::NData, offset)
+                    }
+
+                    _ => {
+                        self.set_state(State::EntityDecl);
+                        self.next()
+                    }
+                },
+                State::NDataDecl => match b {
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name();
+                        self.set_state(self.prev_state);
+                        self.chomp(TokenKind::Name(name), offset)
+                    }
+                },
+                State::ElementStart => None,
+            },
+        }
     }
 }
 
@@ -336,7 +722,7 @@ fn chomp_system_literal<'a>(stream: &mut InputStream<'a>) {
     }
 
     // TODO: dereference to obtain input (this one is going low on the priority list lol)
-    stream.push_token(TokenKind::SystemLiteral(stream.slice_from(offset)), offset);
+    stream.push_token(TokenKind::Literal(stream.slice_from(offset)), offset);
     stream.push_token(kind, stream.pos);
     stream.advance(1);
 }
@@ -361,7 +747,7 @@ fn chomp_public_id_literal<'a>(stream: &mut InputStream<'a>) {
             Some(_) => stream.advance(1),
         }
     }
-    stream.push_token(TokenKind::PubidLiteral(stream.slice_from(offset)), offset);
+    stream.push_token(TokenKind::Literal(stream.slice_from(offset)), offset);
     stream.push_token(kind, stream.pos);
     stream.advance(1);
 }
@@ -404,7 +790,7 @@ fn chomp_comment<'a>(stream: &mut InputStream<'a>) {
 fn chomp_processing_instruction<'a>(stream: &mut InputStream<'a>) {
     let offset = stream.pos;
 
-    stream.push_token(TokenKind::ProcessingInstructionStart, offset);
+    stream.push_token(TokenKind::PIStart, offset);
     stream.advance(2);
 
     chomp_name(stream);
@@ -420,7 +806,7 @@ fn chomp_processing_instruction<'a>(stream: &mut InputStream<'a>) {
     }
 
     stream.push_token(TokenKind::CharData(stream.slice_from(offset)), offset);
-    stream.push_token(TokenKind::ProcessingInstructionEnd, stream.pos);
+    stream.push_token(TokenKind::PIEnd, stream.pos);
     stream.advance(2);
 }
 
@@ -470,7 +856,7 @@ fn chomp_prolog<'a>(stream: &mut InputStream<'a>) {
 fn chomp_xml_decl<'a>(stream: &mut InputStream<'a>) {
     // TODO: Should this be its own token/token sequence to make parsing a bit easier?
     stream.advance(2);
-    stream.push_token(TokenKind::ProcessingInstructionStart, stream.pos);
+    stream.push_token(TokenKind::PIStart, stream.pos);
     chomp_name(stream);
 
     loop {
@@ -485,7 +871,7 @@ fn chomp_xml_decl<'a>(stream: &mut InputStream<'a>) {
                 stream.advance(1);
             }
             Some(b'?') if stream.starts_with("?>") => {
-                stream.push_token(TokenKind::ProcessingInstructionEnd, stream.pos);
+                stream.push_token(TokenKind::PIEnd, stream.pos);
                 stream.advance(2);
                 break;
             }
@@ -589,7 +975,7 @@ fn chomp_element_start<'a>(stream: &mut InputStream<'a>) -> bool {
     chomp_whitespace(stream);
     chomp_name(stream);
 
-    let has_content = loop {
+    loop {
         chomp_whitespace(stream);
         let offset = stream.pos;
         match stream.current_byte() {
@@ -615,9 +1001,7 @@ fn chomp_element_start<'a>(stream: &mut InputStream<'a>) -> bool {
                 chomp_name(stream);
             }
         }
-    };
-
-    has_content
+    }
 }
 
 /// [43] content  ::=  CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
@@ -748,12 +1132,14 @@ fn chomp_entity_decl<'a>(stream: &mut InputStream<'a>) {
         stream.push_token(TokenKind::PEDecl, stream.pos);
         chomp_whitespace(stream);
         chomp_pe_def(stream);
+        chomp_whitespace(stream);
     } else {
         stream.push_token(TokenKind::GEDecl, stream.pos);
         chomp_whitespace(stream);
         chomp_name(stream);
         chomp_whitespace(stream);
         chomp_entity_def(stream);
+        chomp_whitespace(stream);
     }
 }
 
@@ -780,8 +1166,6 @@ fn chomp_pe_def<'a>(stream: &mut InputStream<'a>) {
     } else {
         chomp_external_id(stream)
     }
-
-    chomp_whitespace(stream);
 }
 
 /// [75] ExternalID  ::=  'SYSTEM' S SystemLiteral | 'PUBLIC' S PubidLiteral S SystemLiteral
@@ -791,14 +1175,12 @@ fn chomp_external_id<'a>(stream: &mut InputStream<'a>) {
     if stream.starts_with("SYSTEM") {
         stream.advance(6);
         chomp_whitespace(stream);
-
         chomp_system_literal(stream);
     }
 
     if stream.starts_with("PUBLIC") {
         stream.advance(6);
         chomp_whitespace(stream);
-
         chomp_public_id_literal(stream);
         chomp_whitespace(stream);
         chomp_system_literal(stream);
@@ -822,4 +1204,229 @@ fn chomp_ndata_decl<'a>(stream: &mut InputStream<'a>) {
 fn chomp_notation_decl<'a>(stream: &mut InputStream<'a>) {
     stream.push_token(TokenKind::MarkupDeclStart, stream.pos);
     unimplemented!("notation decl")
+}
+
+#[cfg(test)]
+mod test {
+    use super::TokenKind::*;
+    use super::*;
+
+    macro_rules! next {
+        ($stream:expr,$kind:expr) => {
+            assert_eq!($kind, $stream.next().unwrap().kind);
+        };
+    }
+
+    #[test]
+    fn test_chomp_xml_decl() {
+        let source = r#"<?xml version="1.0" encoding="UTF-8"?>"#;
+        let mut stream = InputStream::new(&source);
+
+        next!(stream, XmlDeclStart);
+        next!(stream, Name("xml"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("version"));
+        next!(stream, Equal);
+        next!(stream, Literal("1.0"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("encoding"));
+        next!(stream, Equal);
+        next!(stream, Literal("UTF-8"));
+        next!(stream, XmlDeclEnd);
+    }
+
+    #[test]
+    fn test_chomp_xml_decl_empty() {
+        let source = r#"<?xml?>"#;
+        let mut stream = InputStream::new(&source);
+
+        next!(stream, XmlDeclStart);
+        next!(stream, Name("xml"));
+        next!(stream, XmlDeclEnd);
+    }
+
+    #[test]
+    fn test_chomp_xml_decl_empty_whitespace() {
+        let source = "<?xml\t\t\n?>";
+        let mut stream = InputStream::new(&source);
+
+        next!(stream, XmlDeclStart);
+        next!(stream, Name("xml"));
+        next!(stream, Whitespace("\t\t\n"));
+        next!(stream, XmlDeclEnd);
+    }
+
+    #[test]
+    fn test_chomp_xml_decl_random_things() {
+        let source = r#"<?xml foo bar baz?>"#;
+        let mut stream = InputStream::new(&source);
+
+        next!(stream, XmlDeclStart);
+        next!(stream, Name("xml"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("bar"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("baz"));
+        next!(stream, XmlDeclEnd);
+    }
+
+    #[test]
+    fn test_chomp_entity_decl_simple() {
+        let source = r#"<!ENTITY name "some name">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("some name"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_chomp_gedecl_simple() {
+        let source = r#"<!ENTITY name "some name">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("some name"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_chomp_gedecl_simple_extra_whitespace() {
+        let source = r#"<!ENTITY name "some name"   >"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("some name"));
+        next!(stream, Whitespace("   "));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_chomp_gedecl_externalid_system() {
+        let source = r#"<!ENTITY name SYSTEM "foo">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("foo"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_chomp_gedecl_externalid_public() {
+        let source = r#"<!ENTITY name PUBLIC "foo" SYSTEM "bar">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Public);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("bar"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_chomp_gedecl_externalid_multiple_system() {
+        let source = r#"<!ENTITY name SYSTEM "foo" SYSTEM "bar" SYSTEM>"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("bar"));
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_chomp_gedecl_externalid_ndata() {
+        let source = r#"<!ENTITY name SYSTEM "foo" NDATA gif>"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, NData);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("gif"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_chomp_gedecl_externalid_backwards() {
+        let source = r#"<!ENTITY name SYSTEM "foo" PUBLIC "bar">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Public);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("bar"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_chomp_gedecl_externalid_no_literal() {
+        let source = r#"<!ENTITY name SYSTEMSYSTEM SYSTEM>"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, System);
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, MarkupDeclEnd);
+    }
 }
