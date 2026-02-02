@@ -30,6 +30,8 @@ pub enum TokenKind<'a> {
     EntityDecl,
     /// `<!ATTLIST`
     AttlistDecl,
+    /// `<!NOTATION`
+    NotationDecl,
     /// Marks incoming EntityDef
     GEDecl,
     /// Marks incoming PEDef
@@ -127,6 +129,7 @@ impl<'a> Debug for TokenKind<'a> {
             Self::CDEnd => write!(f, "MarkupDeclEnd"),
             Self::EntityDecl => write!(f, "EntityDecl"),
             Self::AttlistDecl => write!(f, "AttlistDecl"),
+            Self::NotationDecl => write!(f, "NotationDecl"),
             Self::GEDecl => write!(f, "GEDecl"),
             Self::PEDecl => write!(f, "PEDecl"),
             Self::NData => write!(f, "NDATA"),
@@ -200,6 +203,7 @@ enum State {
     IntSubset,
     ExternalId,
     AttlistDecl,
+    NotationDecl,
     DefaultDecl,
     NotationType,
     Enumeration,
@@ -505,7 +509,12 @@ impl<'a> Iterator for InputStream<'a> {
                         self.set_state(State::AttlistDecl);
                         self.chomp(TokenKind::AttlistDecl, offset)
                     }
-                    // b if self.starts_with("<!NOTATION") => chomp_notation_decl(stream),
+                    b if self.starts_with("<!NOTATION") => {
+                        let offset = self.pos;
+                        self.advance(10);
+                        self.set_state(State::NotationDecl);
+                        self.chomp(TokenKind::NotationDecl, offset)
+                    }
                     b if self.starts_with("<?") => {
                         self.set_state(State::PI(false));
                         self.next()
@@ -668,7 +677,6 @@ impl<'a> Iterator for InputStream<'a> {
                         self.state = State::NDataDecl;
                         self.chomp(TokenKind::NData, offset)
                     }
-
                     _ => {
                         self.set_state(State::EntityDecl);
                         self.next()
@@ -680,6 +688,22 @@ impl<'a> Iterator for InputStream<'a> {
                         let offset = self.pos;
                         let name = self.chomp_name()?;
                         self.set_state(self.prev_state);
+                        self.chomp(TokenKind::Name(name), offset)
+                    }
+                },
+                State::NotationDecl => match b {
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    b'>' => {
+                        self.set_state(State::IntSubset);
+                        self.chomp_single(TokenKind::MarkupDeclEnd)
+                    }
+                    b if self.starts_with("SYSTEM") || self.starts_with("PUBLIC") => {
+                        self.set_state(State::ExternalId);
+                        self.next()
+                    }
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name()?;
                         self.chomp(TokenKind::Name(name), offset)
                     }
                 },
@@ -1793,6 +1817,57 @@ mod test {
         next!(stream, RightParen);
         next!(stream, Whitespace(" "));
         next!(stream, Implied);
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_notation_decl_external_id_system() {
+        let source = r#"<!NOTATION name SYSTEM "name.txt">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, NotationDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("name.txt"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_notation_decl_external_id_public() {
+        let source = r#"<!NOTATION JPGformat PUBLIC "jpg 1" "jpg 2">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, NotationDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("JPGformat"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Public);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("jpg 1"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("jpg 2"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_notation_decl_public_id() {
+        let source = r#"<!NOTATION a PUBLIC "b"  >"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, NotationDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("a"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Public);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("b"));
+        next!(stream, Whitespace("  "));
         next!(stream, MarkupDeclEnd);
     }
 }
