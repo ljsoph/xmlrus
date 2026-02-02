@@ -26,6 +26,8 @@ pub enum TokenKind<'a> {
     CDStart,
     /// `]]>`
     CDEnd,
+    /// `<!ELEMENT`
+    ElementDecl,
     /// `<!ENTITY`
     EntityDecl,
     /// `<!ATTLIST`
@@ -62,6 +64,12 @@ pub enum TokenKind<'a> {
     Implied,
     /// `#FIXED`
     Fixed,
+    /// `EMPTY`
+    Empty,
+    /// `ANY`
+    Any,
+    /// `#PCDATA`
+    PCData,
 
     // === Element ===
     /// `<`
@@ -106,6 +114,12 @@ pub enum TokenKind<'a> {
     Pipe,
     /// `,`
     Comma,
+    /// `?`
+    QuestionMark,
+    /// `*`
+    Star,
+    /// `+`
+    Plus,
     /// space, tab, newline, or carriage return
     Whitespace(&'a str),
     /// `unreachable!()` without the panic
@@ -127,6 +141,7 @@ impl<'a> Debug for TokenKind<'a> {
             Self::MarkupDeclEnd => write!(f, "MarkupDeclEnd"),
             Self::CDStart => write!(f, "MarkupDeclStart"),
             Self::CDEnd => write!(f, "MarkupDeclEnd"),
+            Self::ElementDecl => write!(f, "ElementDecl"),
             Self::EntityDecl => write!(f, "EntityDecl"),
             Self::AttlistDecl => write!(f, "AttlistDecl"),
             Self::NotationDecl => write!(f, "NotationDecl"),
@@ -141,9 +156,15 @@ impl<'a> Debug for TokenKind<'a> {
             Self::RightParen => write!(f, "RightParen"),
             Self::Pipe => write!(f, "Pipe"),
             Self::Comma => write!(f, "Comma"),
+            Self::QuestionMark => write!(f, "QuestionMark"),
+            Self::Star => write!(f, "Star"),
+            Self::Plus => write!(f, "Plus"),
             Self::Required => write!(f, "Required"),
             Self::Implied => write!(f, "Implied"),
             Self::Fixed => write!(f, "Fixed"),
+            Self::Empty => write!(f, "Empty"),
+            Self::Any => write!(f, "Any"),
+            Self::PCData => write!(f, "PCData"),
             Self::EntityValue(value) => write!(f, "EntityValue(\"{value}\")"),
             Self::CData => write!(f, "CData)"),
             Self::TokenizedType(tokenized_type) => write!(f, "TokenizedType(\"{tokenized_type:?}\")"),
@@ -185,12 +206,15 @@ pub enum TokenizedType {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Token<'a> {
     pub kind: TokenKind<'a>,
-    offset: usize,
+    offset: u32,
 }
 
 impl<'a> Token<'a> {
     fn new(kind: TokenKind<'a>, offset: usize) -> Self {
-        Self { kind, offset }
+        Self {
+            kind,
+            offset: offset as u32,
+        }
     }
 }
 
@@ -198,20 +222,22 @@ impl<'a> Token<'a> {
 enum State {
     Idle,
     XmlDecl,
+    Comment,
     PI(bool),
     Dtd,
     IntSubset,
-    ExternalId,
+    ElementDecl,
     AttlistDecl,
     NotationDecl,
     DefaultDecl,
+    EntityDecl,
+    NDataDecl,
     NotationType,
     Enumeration,
-    EntityDecl,
     EntityDef,
     PEDef,
-    NDataDecl,
-    Comment,
+    ExternalId,
+    ContentSpec,
     ElementStart,
 }
 
@@ -281,6 +307,11 @@ impl<'a> InputStream<'a> {
     fn chomp_single(&mut self, kind: TokenKind<'a>) -> Option<Token<'a>> {
         self.advance(1);
         self.chomp(kind, self.pos - 1)
+    }
+
+    fn chomp_back(&mut self, kind: TokenKind<'a>, amount: usize) -> Option<Token<'a>> {
+        self.advance(amount);
+        self.chomp(kind, self.pos - amount)
     }
 
     fn chomp_ws(&mut self) -> Option<Token<'a>> {
@@ -496,7 +527,12 @@ impl<'a> Iterator for InputStream<'a> {
                         self.set_state(State::Dtd);
                         self.chomp_single(TokenKind::IntSubsetEnd)
                     }
-                    // b if self.starts_with("<!ELEMENT") => chomp_element_type_decl(stream),
+                    b if self.starts_with("<!ELEMENT") => {
+                        let offset = self.pos;
+                        self.advance(9);
+                        self.set_state(State::ElementDecl);
+                        self.chomp(TokenKind::ElementDecl, offset)
+                    }
                     b if self.starts_with("<!ENTITY") => {
                         let offset = self.pos;
                         self.advance(8);
@@ -531,55 +567,42 @@ impl<'a> Iterator for InputStream<'a> {
                     }
                 },
                 State::AttlistDecl => match b {
-                    b'>' => {
-                        self.set_state(State::IntSubset);
-                        self.chomp_single(TokenKind::MarkupDeclEnd)
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    b if self.starts_with("CDATA") => self.chomp_back(TokenKind::CData, 5),
+                    b if self.starts_with("IDREFS") => {
+                        self.chomp_back(TokenKind::TokenizedType(TokenizedType::IdRefs), 6)
+                    }
+                    b if self.starts_with("IDREF") => {
+                        self.chomp_back(TokenKind::TokenizedType(TokenizedType::IdRef), 5)
+                    }
+                    b if self.starts_with("ID") => self.chomp_back(TokenKind::TokenizedType(TokenizedType::Id), 2),
+                    b if self.starts_with("ENTITY") => {
+                        self.chomp_back(TokenKind::TokenizedType(TokenizedType::Entity), 6)
+                    }
+                    b if self.starts_with("ENTITIES") => {
+                        self.chomp_back(TokenKind::TokenizedType(TokenizedType::Entities), 8)
+                    }
+                    b if self.starts_with("NMTOKENS") => {
+                        self.chomp_back(TokenKind::TokenizedType(TokenizedType::NmTokens), 8)
+                    }
+                    b if self.starts_with("NMTOKEN") => {
+                        self.chomp_back(TokenKind::TokenizedType(TokenizedType::NmToken), 7)
+                    }
+                    b if self.starts_with("NOTATION") => {
+                        self.set_state(State::NotationType);
+                        self.chomp_back(TokenKind::NotationType, 8)
+                    }
+                    b'(' => {
+                        self.set_state(State::Enumeration);
+                        self.chomp(TokenKind::Enumeration, self.pos)
                     }
                     b'#' | b'"' => {
                         self.set_state(State::DefaultDecl);
                         self.next()
                     }
-                    b if self.is_ws(b) => self.chomp_ws(),
-                    b if self.starts_with("CDATA") => {
-                        self.advance(5);
-                        self.chomp(TokenKind::CData, self.pos - 5)
-                    }
-                    b if self.starts_with("IDREFS") => {
-                        self.advance(6);
-                        self.chomp(TokenKind::TokenizedType(TokenizedType::IdRefs), self.pos - 6)
-                    }
-                    b if self.starts_with("IDREF") => {
-                        self.advance(5);
-                        self.chomp(TokenKind::TokenizedType(TokenizedType::IdRef), self.pos - 5)
-                    }
-                    b if self.starts_with("ID") => {
-                        self.advance(2);
-                        self.chomp(TokenKind::TokenizedType(TokenizedType::Id), self.pos - 2)
-                    }
-                    b if self.starts_with("ENTITY") => {
-                        self.advance(6);
-                        self.chomp(TokenKind::TokenizedType(TokenizedType::Entity), self.pos - 6)
-                    }
-                    b if self.starts_with("ENTITIES") => {
-                        self.advance(8);
-                        self.chomp(TokenKind::TokenizedType(TokenizedType::Entities), self.pos - 8)
-                    }
-                    b if self.starts_with("NMTOKENS") => {
-                        self.advance(8);
-                        self.chomp(TokenKind::TokenizedType(TokenizedType::NmTokens), self.pos - 8)
-                    }
-                    b if self.starts_with("NMTOKEN") => {
-                        self.advance(7);
-                        self.chomp(TokenKind::TokenizedType(TokenizedType::NmToken), self.pos - 7)
-                    }
-                    b if self.starts_with("NOTATION") => {
-                        self.advance(8);
-                        self.set_state(State::NotationType);
-                        self.chomp(TokenKind::NotationType, self.pos - 8)
-                    }
-                    b'(' => {
-                        self.set_state(State::Enumeration);
-                        self.chomp(TokenKind::Enumeration, self.pos)
+                    b'>' => {
+                        self.set_state(State::IntSubset);
+                        self.chomp_single(TokenKind::MarkupDeclEnd)
                     }
                     _ => {
                         let offset = self.pos;
@@ -701,6 +724,44 @@ impl<'a> Iterator for InputStream<'a> {
                         self.set_state(State::ExternalId);
                         self.next()
                     }
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name()?;
+                        self.chomp(TokenKind::Name(name), offset)
+                    }
+                },
+                State::ElementDecl => match b {
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    b if self.starts_with("EMPTY") => self.chomp_back(TokenKind::Empty, 5),
+                    b if self.starts_with("ANY") => self.chomp_back(TokenKind::Any, 3),
+                    b'>' => {
+                        self.set_state(State::IntSubset);
+                        self.chomp_single(TokenKind::MarkupDeclEnd)
+                    }
+                    b'(' => {
+                        self.set_state(State::ContentSpec);
+                        self.chomp_single(TokenKind::LeftParen)
+                    }
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name()?;
+                        self.chomp(TokenKind::Name(name), offset)
+                    }
+                },
+                State::ContentSpec => match b {
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    b'(' => self.chomp_single(TokenKind::LeftParen),
+                    b')' => self.chomp_single(TokenKind::RightParen),
+                    b'|' => self.chomp_single(TokenKind::Pipe),
+                    b'?' => self.chomp_single(TokenKind::QuestionMark),
+                    b'*' => self.chomp_single(TokenKind::Star),
+                    b'+' => self.chomp_single(TokenKind::Plus),
+                    b',' => self.chomp_single(TokenKind::Comma),
+                    b'>' => {
+                        self.set_state(State::IntSubset);
+                        self.chomp_single(TokenKind::MarkupDeclEnd)
+                    }
+                    b if self.starts_with("#PCDATA") => self.chomp_back(TokenKind::PCData, 7),
                     _ => {
                         let offset = self.pos;
                         let name = self.chomp_name()?;
@@ -1868,6 +1929,135 @@ mod test {
         next!(stream, Whitespace(" "));
         next!(stream, Literal("b"));
         next!(stream, Whitespace("  "));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_element_decl_empty() {
+        let source = r#"<!ELEMENT name EMPTY>"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, ElementDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Empty);
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_element_decl_any() {
+        let source = r#"<!ELEMENT name ANY>"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, ElementDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Any);
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_element_decl_any_bad_casing() {
+        let source = r#"<!ELEMENT name any>"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, ElementDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("any"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_element_decl_mixed() {
+        let source = r#"<!ELEMENT name (#PCDATA)>"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, ElementDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, LeftParen);
+        next!(stream, PCData);
+        next!(stream, RightParen);
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_element_decl_mixed_names() {
+        let source = r#"<!ELEMENT name (#PCDATA|a|b|c)>"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, ElementDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, LeftParen);
+        next!(stream, PCData);
+        next!(stream, Pipe);
+        next!(stream, Name("a"));
+        next!(stream, Pipe);
+        next!(stream, Name("b"));
+        next!(stream, Pipe);
+        next!(stream, Name("c"));
+        next!(stream, RightParen);
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_element_decl_mixed_no_paren() {
+        let source = r#"<!ELEMENT name #PCDATA>"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, ElementDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("name"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Name(""));
+        next!(stream, Name("PCDATA"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_element_decl_children() {
+        let source = r#"<!ELEMENT div1 (head, (p | list | note)*, div2*)>"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, ElementDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("div1"));
+        next!(stream, Whitespace(" "));
+        next!(stream, LeftParen);
+        next!(stream, Name("head"));
+        next!(stream, Comma);
+        next!(stream, Whitespace(" "));
+        next!(stream, LeftParen);
+        next!(stream, Name("p"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Pipe);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("list"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Pipe);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("note"));
+        next!(stream, RightParen);
+        next!(stream, Star);
+        next!(stream, Comma);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("div2"));
+        next!(stream, Star);
+        next!(stream, RightParen);
         next!(stream, MarkupDeclEnd);
     }
 }
