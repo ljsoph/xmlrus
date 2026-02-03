@@ -48,6 +48,10 @@ pub enum TokenKind<'a> {
     Literal(&'a str),
     /// `([^%&"] | PEReference | Reference)*`
     EntityValue(&'a str),
+    /// `'&' Name ';'`
+    EntityRef(&'a str),
+    /// Character Reference
+    CharRef(&'a str),
 
     // === AttType ===
     /// `CDATA`
@@ -86,14 +90,8 @@ pub enum TokenKind<'a> {
     // === misc ===
     /// Text inside `content`, also used as the fallback when parsing unexpected characters
     CharData(&'a str),
-    /// Reference Start
-    Percent,
-    /// Reference End
-    SemiColon,
     /// Text between `<!--` and `-->`
     Comment(&'a str),
-    /// `=`
-    Equal,
     /// `Name` or `QName`
     Name(&'a str),
     /// NmToken
@@ -102,6 +100,8 @@ pub enum TokenKind<'a> {
     PIStart,
     /// `?>`
     PIEnd,
+    /// `=`
+    Equal,
     /// `'`
     SingleQuote,
     /// `"`
@@ -120,6 +120,14 @@ pub enum TokenKind<'a> {
     Star,
     /// `+`
     Plus,
+    /// `&`
+    Ampersand,
+    /// `#`
+    Pound,
+    /// `%`
+    Percent,
+    /// `;`
+    SemiColon,
     /// space, tab, newline, or carriage return
     Whitespace(&'a str),
     /// `unreachable!()` without the panic
@@ -139,8 +147,8 @@ impl<'a> Debug for TokenKind<'a> {
             Self::IntSubsetEnd => write!(f, "IntSubsetEnd"),
             Self::MarkupDeclStart => write!(f, "MarkupDeclStart"),
             Self::MarkupDeclEnd => write!(f, "MarkupDeclEnd"),
-            Self::CDStart => write!(f, "MarkupDeclStart"),
-            Self::CDEnd => write!(f, "MarkupDeclEnd"),
+            Self::CDStart => write!(f, "CDStart"),
+            Self::CDEnd => write!(f, "CDEnd"),
             Self::ElementDecl => write!(f, "ElementDecl"),
             Self::EntityDecl => write!(f, "EntityDecl"),
             Self::AttlistDecl => write!(f, "AttlistDecl"),
@@ -159,6 +167,8 @@ impl<'a> Debug for TokenKind<'a> {
             Self::QuestionMark => write!(f, "QuestionMark"),
             Self::Star => write!(f, "Star"),
             Self::Plus => write!(f, "Plus"),
+            Self::Ampersand => write!(f, "Ampersand"),
+            Self::Pound => write!(f, "Pound"),
             Self::Required => write!(f, "Required"),
             Self::Implied => write!(f, "Implied"),
             Self::Fixed => write!(f, "Fixed"),
@@ -166,6 +176,8 @@ impl<'a> Debug for TokenKind<'a> {
             Self::Any => write!(f, "Any"),
             Self::PCData => write!(f, "PCData"),
             Self::EntityValue(value) => write!(f, "EntityValue(\"{value}\")"),
+            Self::EntityRef(entity_ref) => write!(f, "EntityRef(\"{entity_ref}\")"),
+            Self::CharRef(char_ref) => write!(f, "CharRef(\"{char_ref}\")"),
             Self::CData => write!(f, "CData)"),
             Self::TokenizedType(tokenized_type) => write!(f, "TokenizedType(\"{tokenized_type:?}\")"),
             Self::Enumeration => write!(f, "Enumeration"),
@@ -220,7 +232,7 @@ impl<'a> Token<'a> {
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum State {
-    Idle,
+    Default,
     XmlDecl,
     Comment,
     PI(bool),
@@ -239,6 +251,11 @@ enum State {
     ExternalId,
     ContentSpec,
     ElementStart,
+    ElementEnd,
+    Attributes,
+    EntityRef,
+    CharRef,
+    CData,
 }
 
 pub struct InputStream<'a> {
@@ -255,8 +272,8 @@ impl<'a> InputStream<'a> {
             source,
             pos: 0,
             tokens: Vec::new(),
-            state: State::Idle,
-            prev_state: State::Idle,
+            state: State::Default,
+            prev_state: State::Default,
         }
     }
 
@@ -385,6 +402,22 @@ impl<'a> InputStream<'a> {
         self.advance(1);
         self.chomp(TokenKind::Literal(literal), offset)
     }
+
+    // 	CharData  ::=  [^<&]* - ([^<&]* ']]>' [^<&]*)
+    fn chomp_char_data(&mut self) -> Option<&'a str> {
+        let offset = self.pos;
+
+        loop {
+            match self.current_byte() {
+                None => return None,
+                Some(b'<' | b'&') => break,
+                Some(b']') if self.starts_with("]]>") => break,
+                Some(_) => self.advance(1),
+            }
+        }
+
+        Some(self.slice_from(offset))
+    }
 }
 
 impl<'a> Iterator for InputStream<'a> {
@@ -394,44 +427,59 @@ impl<'a> Iterator for InputStream<'a> {
         match self.current_byte() {
             None => None,
             Some(b) => match self.state {
-                State::Idle => match b {
+                // 	CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
+                State::Default => match b {
                     b'<' if self.starts_with("<?xml") => {
-                        let offset = self.pos;
-                        self.advance(2);
                         self.set_state(State::XmlDecl);
-                        self.chomp(TokenKind::XmlDeclStart, offset)
+                        self.chomp_back(TokenKind::XmlDeclStart, 2)
                     }
                     b'<' if self.starts_with("<?") => {
-                        let offset = self.pos;
-                        self.advance(2);
                         self.set_state(State::PI(false));
-                        self.chomp(TokenKind::PIStart, offset)
+                        self.chomp_back(TokenKind::PIStart, 2)
                     }
                     b'<' if self.starts_with("<!--") => {
                         self.set_state(State::Comment);
                         self.next()
                     }
                     b'<' if self.starts_with("<!DOCTYPE") => {
-                        self.advance(9);
                         self.set_state(State::Dtd);
-                        self.chomp(TokenKind::DTDStart, self.pos - 9)
+                        self.chomp_back(TokenKind::DTDStart, 9)
+                    }
+                    b'<' if self.starts_with("<![CDATA[") => {
+                        self.set_state(State::CData);
+                        self.chomp_back(TokenKind::CDStart, 9)
+                    }
+                    b'<' if self.starts_with("</") => {
+                        self.set_state(State::ElementEnd);
+                        self.chomp_back(TokenKind::TagEndStart, 2)
                     }
                     b'<' => {
                         self.set_state(State::ElementStart);
+                        self.chomp_single(TokenKind::OpenTagStart)
+                    }
+                    b'&' => {
+                        if self.starts_with("&#") {
+                            self.advance(2);
+                            self.set_state(State::CharRef);
+                        } else {
+                            self.advance(1);
+                            self.set_state(State::EntityRef);
+                        }
                         self.next()
                     }
-                    b if self.is_ws(b) => self.chomp_ws(),
-                    _ => panic!("IDLE???"),
+                    _ => {
+                        let offset = self.pos;
+                        let char_data = self.chomp_char_data()?;
+                        self.chomp(TokenKind::CharData(char_data), offset)
+                    }
                 },
                 State::XmlDecl => match b {
                     q @ b'\'' | q @ b'"' => self.chomp_literal(q),
                     b if self.is_ws(b) => self.chomp_ws(),
                     b'=' => self.chomp_single(TokenKind::Equal),
                     b'?' if self.starts_with("?>") => {
-                        let offset = self.pos;
-                        self.advance(2);
-                        self.set_state(State::Idle);
-                        self.chomp(TokenKind::XmlDeclEnd, offset)
+                        self.set_state(State::Default);
+                        self.chomp_back(TokenKind::XmlDeclEnd, 2)
                     }
                     _ => {
                         let offset = self.pos;
@@ -458,10 +506,8 @@ impl<'a> Iterator for InputStream<'a> {
                 }
                 State::PI(target_chomped) => match b {
                     b'?' if self.starts_with("?>") => {
-                        let offset = self.pos;
-                        self.advance(2);
                         self.set_state(self.prev_state);
-                        self.chomp(TokenKind::PIEnd, offset)
+                        self.chomp_back(TokenKind::PIEnd, 2)
                     }
                     b if self.is_ws(b) => self.chomp_ws(),
                     _ => {
@@ -483,8 +529,9 @@ impl<'a> Iterator for InputStream<'a> {
                     }
                 },
                 State::Dtd => match b {
+                    b if self.is_ws(b) => self.chomp_ws(),
                     b'>' => {
-                        self.set_state(State::Idle);
+                        self.set_state(State::Default);
                         self.chomp_single(TokenKind::DTDEnd)
                     }
                     b'[' => {
@@ -495,7 +542,6 @@ impl<'a> Iterator for InputStream<'a> {
                         self.set_state(State::ExternalId);
                         self.next()
                     }
-                    b if self.is_ws(b) => self.chomp_ws(),
                     _ => {
                         let offset = self.pos;
                         let name = self.chomp_name()?;
@@ -504,16 +550,8 @@ impl<'a> Iterator for InputStream<'a> {
                 },
                 State::ExternalId => match b {
                     q @ b'\'' | q @ b'"' => self.chomp_literal(q),
-                    b if self.starts_with("SYSTEM") => {
-                        let offset = self.pos;
-                        self.advance(6);
-                        self.chomp(TokenKind::System, offset)
-                    }
-                    b if self.starts_with("PUBLIC") => {
-                        let offset = self.pos;
-                        self.advance(6);
-                        self.chomp(TokenKind::Public, offset)
-                    }
+                    b if self.starts_with("SYSTEM") => self.chomp_back(TokenKind::System, 6),
+                    b if self.starts_with("PUBLIC") => self.chomp_back(TokenKind::Public, 6),
                     b if self.is_ws(b) => self.chomp_ws(),
                     _ => {
                         self.set_state(self.prev_state);
@@ -528,28 +566,20 @@ impl<'a> Iterator for InputStream<'a> {
                         self.chomp_single(TokenKind::IntSubsetEnd)
                     }
                     b if self.starts_with("<!ELEMENT") => {
-                        let offset = self.pos;
-                        self.advance(9);
                         self.set_state(State::ElementDecl);
-                        self.chomp(TokenKind::ElementDecl, offset)
+                        self.chomp_back(TokenKind::ElementDecl, 9)
                     }
                     b if self.starts_with("<!ENTITY") => {
-                        let offset = self.pos;
-                        self.advance(8);
                         self.set_state(State::EntityDecl);
-                        self.chomp(TokenKind::EntityDecl, offset)
+                        self.chomp_back(TokenKind::EntityDecl, 8)
                     }
                     b if self.starts_with("<!ATTLIST") => {
-                        let offset = self.pos;
-                        self.advance(9);
                         self.set_state(State::AttlistDecl);
-                        self.chomp(TokenKind::AttlistDecl, offset)
+                        self.chomp_back(TokenKind::AttlistDecl, 9)
                     }
                     b if self.starts_with("<!NOTATION") => {
-                        let offset = self.pos;
-                        self.advance(10);
                         self.set_state(State::NotationDecl);
-                        self.chomp(TokenKind::NotationDecl, offset)
+                        self.chomp_back(TokenKind::NotationDecl, 10)
                     }
                     b if self.starts_with("<?") => {
                         self.set_state(State::PI(false));
@@ -647,19 +677,14 @@ impl<'a> Iterator for InputStream<'a> {
                         self.chomp_literal(q)
                     }
                     b if self.starts_with("#REQUIRED") => {
-                        self.advance(9);
                         self.set_state(State::AttlistDecl);
-                        self.chomp(TokenKind::Required, self.pos - 9)
+                        self.chomp_back(TokenKind::Required, 9)
                     }
                     b if self.starts_with("#IMPLIED") => {
-                        self.advance(8);
                         self.set_state(State::AttlistDecl);
-                        self.chomp(TokenKind::Implied, self.pos - 8)
+                        self.chomp_back(TokenKind::Implied, 8)
                     }
-                    b if self.starts_with("#FIXED") => {
-                        self.advance(6);
-                        self.chomp(TokenKind::Fixed, self.pos - 6)
-                    }
+                    b if self.starts_with("#FIXED") => self.chomp_back(TokenKind::Fixed, 6),
                     _ => self.chomp_single(TokenKind::Unreachable("Invalid character in DefaultDecl")),
                 },
                 State::EntityDecl => match b {
@@ -694,11 +719,9 @@ impl<'a> Iterator for InputStream<'a> {
                         self.next()
                     }
                     b if self.starts_with("NDATA") => {
-                        let offset = self.pos;
-                        self.advance(5);
                         self.prev_state = State::EntityDecl;
                         self.state = State::NDataDecl;
-                        self.chomp(TokenKind::NData, offset)
+                        self.chomp_back(TokenKind::NData, 5)
                     }
                     _ => {
                         self.set_state(State::EntityDecl);
@@ -768,7 +791,82 @@ impl<'a> Iterator for InputStream<'a> {
                         self.chomp(TokenKind::Name(name), offset)
                     }
                 },
-                State::ElementStart => None,
+                State::ElementStart => {
+                    let offset = self.pos;
+                    let name = self.chomp_name()?;
+                    self.set_state(State::Attributes);
+                    self.chomp(TokenKind::Name(name), offset)
+                }
+                State::ElementEnd => match b {
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    b'>' => {
+                        self.set_state(State::Default);
+                        self.chomp_single(TokenKind::TagEnd)
+                    }
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name()?;
+                        self.chomp(TokenKind::Name(name), offset)
+                    }
+                },
+                State::Attributes => match b {
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    q @ b'\'' | q @ b'"' => self.chomp_literal(q),
+                    b'=' => self.chomp_single(TokenKind::Equal),
+                    b'>' => {
+                        self.set_state(State::Default);
+                        self.chomp_single(TokenKind::TagEnd)
+                    }
+                    b'/' if self.starts_with("/>") => {
+                        self.set_state(State::Default);
+                        self.chomp_back(TokenKind::EmptyTagEnd, 2)
+                    }
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name()?;
+                        self.chomp(TokenKind::Name(name), offset)
+                    }
+                },
+                State::CData => match b {
+                    b']' if self.starts_with("]]>") => {
+                        self.set_state(self.prev_state);
+                        self.chomp_back(TokenKind::CDEnd, 3)
+                    }
+                    _ => {
+                        let offset = self.pos;
+                        let char_data = self.chomp_char_data()?;
+                        self.chomp(TokenKind::CharData(char_data), offset)
+                    }
+                },
+                State::EntityRef => match b {
+                    b';' => {
+                        self.set_state(self.prev_state);
+                        self.chomp_single(TokenKind::SemiColon)
+                    }
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name()?;
+                        self.chomp(TokenKind::Name(name), offset)
+                    }
+                },
+                State::CharRef => match b {
+                    b';' => {
+                        self.set_state(self.prev_state);
+                        self.chomp_single(TokenKind::SemiColon)
+                    }
+                    _ => {
+                        let offset = self.pos;
+                        loop {
+                            match self.current_byte() {
+                                None => return None,
+                                Some(b) if b == b';' => break,
+                                Some(_) => self.advance(1),
+                            }
+                        }
+                        let char_ref = self.slice_from(offset);
+                        self.chomp(TokenKind::CharRef(char_ref), offset)
+                    }
+                },
             },
         }
     }
