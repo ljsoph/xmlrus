@@ -48,10 +48,12 @@ pub enum TokenKind<'a> {
     Literal(&'a str),
     /// `([^%&"] | PEReference | Reference)*`
     EntityValue(&'a str),
-    /// `'&' Name ';'`
-    EntityRef(&'a str),
-    /// Character Reference
-    CharRef(&'a str),
+    /// `&`
+    EntityRef,
+    /// `&#`
+    CharRefDecimal,
+    /// `&#x`
+    CharRefHexadecimal,
 
     // === AttType ===
     /// `CDATA`
@@ -120,10 +122,6 @@ pub enum TokenKind<'a> {
     Star,
     /// `+`
     Plus,
-    /// `&`
-    Ampersand,
-    /// `#`
-    Pound,
     /// `%`
     Percent,
     /// `;`
@@ -132,6 +130,8 @@ pub enum TokenKind<'a> {
     Whitespace(&'a str),
     /// `unreachable!()` without the panic
     Unreachable(&'static str),
+    /// Error token to allow graceful error handling during parsing
+    Error(&'static str),
     /// End of File
     Eof,
 }
@@ -167,8 +167,6 @@ impl<'a> Debug for TokenKind<'a> {
             Self::QuestionMark => write!(f, "QuestionMark"),
             Self::Star => write!(f, "Star"),
             Self::Plus => write!(f, "Plus"),
-            Self::Ampersand => write!(f, "Ampersand"),
-            Self::Pound => write!(f, "Pound"),
             Self::Required => write!(f, "Required"),
             Self::Implied => write!(f, "Implied"),
             Self::Fixed => write!(f, "Fixed"),
@@ -176,8 +174,9 @@ impl<'a> Debug for TokenKind<'a> {
             Self::Any => write!(f, "Any"),
             Self::PCData => write!(f, "PCData"),
             Self::EntityValue(value) => write!(f, "EntityValue(\"{value}\")"),
-            Self::EntityRef(entity_ref) => write!(f, "EntityRef(\"{entity_ref}\")"),
-            Self::CharRef(char_ref) => write!(f, "CharRef(\"{char_ref}\")"),
+            Self::EntityRef => write!(f, "EntityRef"),
+            Self::CharRefDecimal => write!(f, "CharRefDecimal"),
+            Self::CharRefHexadecimal => write!(f, "CharRefHexaecimal"),
             Self::CData => write!(f, "CData)"),
             Self::TokenizedType(tokenized_type) => write!(f, "TokenizedType(\"{tokenized_type:?}\")"),
             Self::Enumeration => write!(f, "Enumeration"),
@@ -199,6 +198,7 @@ impl<'a> Debug for TokenKind<'a> {
             Self::DoubleQuote => write!(f, "DoubleQuote"),
             Self::Whitespace(_) => write!(f, "Whitespace"),
             Self::Unreachable(reason) => write!(f, "Unreachable({reason})"),
+            Self::Error(reason) => write!(f, "Error({reason})"),
             Self::Eof => write!(f, "Eof"),
         }
     }
@@ -254,7 +254,7 @@ enum State {
     ElementEnd,
     Attributes,
     EntityRef,
-    CharRef,
+    CharRef(bool),
     CData,
 }
 
@@ -458,14 +458,16 @@ impl<'a> Iterator for InputStream<'a> {
                         self.chomp_single(TokenKind::OpenTagStart)
                     }
                     b'&' => {
-                        if self.starts_with("&#") {
-                            self.advance(2);
-                            self.set_state(State::CharRef);
+                        if self.starts_with("&#x") {
+                            self.set_state(State::CharRef(true));
+                            self.chomp_back(TokenKind::CharRefHexadecimal, 3)
+                        } else if self.starts_with("&#") {
+                            self.set_state(State::CharRef(false));
+                            self.chomp_back(TokenKind::CharRefDecimal, 2)
                         } else {
-                            self.advance(1);
                             self.set_state(State::EntityRef);
+                            self.chomp_single(TokenKind::EntityRef)
                         }
-                        self.next()
                     }
                     _ => {
                         let offset = self.pos;
@@ -849,7 +851,7 @@ impl<'a> Iterator for InputStream<'a> {
                         self.chomp(TokenKind::Name(name), offset)
                     }
                 },
-                State::CharRef => match b {
+                State::CharRef(is_hex) => match b {
                     b';' => {
                         self.set_state(self.prev_state);
                         self.chomp_single(TokenKind::SemiColon)
@@ -857,14 +859,21 @@ impl<'a> Iterator for InputStream<'a> {
                     _ => {
                         let offset = self.pos;
                         loop {
-                            match self.current_byte() {
-                                None => return None,
-                                Some(b) if b == b';' => break,
-                                Some(_) => self.advance(1),
+                            match (is_hex, self.current_byte()) {
+                                (_, None) => return None,
+                                (true, Some(b)) if !b.is_ascii_hexdigit() => break,
+                                (false, Some(b)) if !b.is_ascii_digit() => break,
+                                (_, Some(_)) => self.advance(1),
                             }
                         }
-                        let char_ref = self.slice_from(offset);
-                        self.chomp(TokenKind::CharRef(char_ref), offset)
+
+                        if offset == self.pos {
+                            self.set_state(self.prev_state);
+                            self.chomp(TokenKind::Error("Empty CharRef"), offset)
+                        } else {
+                            let char_ref = self.slice_from(offset);
+                            self.chomp(TokenKind::Literal(char_ref), offset)
+                        }
                     }
                 },
             },
@@ -2157,5 +2166,85 @@ mod test {
         next!(stream, Star);
         next!(stream, RightParen);
         next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_entity_ref() {
+        let source = r#"&da_ref;"#;
+        let mut stream = InputStream::new(&source);
+
+        next!(stream, EntityRef);
+        next!(stream, Name("da_ref"));
+        next!(stream, SemiColon);
+    }
+
+    #[test]
+    fn test_entity_ref_double_ampersand() {
+        let source = r#"&&da_ref;"#;
+        let mut stream = InputStream::new(&source);
+
+        next!(stream, EntityRef);
+        next!(stream, Name(""));
+        next!(stream, Name("da_ref"));
+        next!(stream, SemiColon);
+    }
+
+    #[test]
+    fn test_entity_ref_multiple_semi() {
+        let source = r#"&da_ref;;"#;
+        let mut stream = InputStream::new(&source);
+
+        next!(stream, EntityRef);
+        next!(stream, Name("da_ref"));
+        next!(stream, SemiColon);
+        assert!(stream.next().is_none()) // EOF reached while parsing `CharData`
+    }
+
+    #[test]
+    fn test_char_ref_decimal() {
+        let source = r#"&#123;"#;
+        let mut stream = InputStream::new(&source);
+
+        next!(stream, CharRefDecimal);
+        next!(stream, Literal("123"));
+        next!(stream, SemiColon);
+    }
+
+    #[test]
+    fn test_char_ref_decimal_invalid_digit() {
+        let source = r#"&#123f;"#;
+        let mut stream = InputStream::new(&source);
+
+        next!(stream, CharRefDecimal);
+        next!(stream, Literal("123"));
+        next!(stream, Error("Empty CharRef"));
+        assert!(stream.next().is_none()) // EOF reached while parsing `CharData`
+    }
+
+    #[test]
+    fn test_char_ref_decimal_invalid_digit_correction() {
+        let source = r#"<a>&#123f;</a>"#;
+        let mut stream = InputStream::new(&source);
+
+        next!(stream, OpenTagStart);
+        next!(stream, Name("a"));
+        next!(stream, TagEnd);
+        next!(stream, CharRefDecimal);
+        next!(stream, Literal("123"));
+        next!(stream, Error("Empty CharRef"));
+        next!(stream, CharData("f;"));
+        next!(stream, TagEndStart);
+        next!(stream, Name("a"));
+        next!(stream, TagEnd);
+    }
+
+    #[test]
+    fn test_char_ref_hexadecimal() {
+        let source = r#"&#xff1233;"#;
+        let mut stream = InputStream::new(&source);
+
+        next!(stream, CharRefHexadecimal);
+        next!(stream, Literal("ff1233"));
+        next!(stream, SemiColon);
     }
 }
