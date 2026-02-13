@@ -89,6 +89,13 @@ pub enum TokenKind<'a> {
     /// Text between single or double quotes
     AttributeValue(&'a str),
 
+    /// XML Version
+    Version,
+    /// XML Encoding
+    Encoding,
+    /// XML Standalone doc
+    Standalone,
+
     // === misc ===
     /// Text inside `content`, also used as the fallback when parsing unexpected characters
     CharData(&'a str),
@@ -194,6 +201,9 @@ impl<'a> Debug for TokenKind<'a> {
             Self::NmToken(nm_token) => write!(f, "NmToken(\"{nm_token}\")"),
             Self::PIStart => write!(f, "PIStart"),
             Self::PIEnd => write!(f, "PIEnd"),
+            Self::Version => write!(f, "Version"),
+            Self::Encoding => write!(f, "Encoding"),
+            Self::Standalone => write!(f, "Standalone"),
             Self::SingleQuote => write!(f, "SingleQuote"),
             Self::DoubleQuote => write!(f, "DoubleQuote"),
             Self::Whitespace(_) => write!(f, "Whitespace"),
@@ -486,7 +496,13 @@ impl<'a> Iterator for InputStream<'a> {
                     _ => {
                         let offset = self.pos;
                         let name = self.chomp_name()?;
-                        self.chomp(TokenKind::Name(name), offset)
+                        let kind = match name {
+                            "version" => TokenKind::Version,
+                            "encoding" => TokenKind::Encoding,
+                            "standalone" => TokenKind::Standalone,
+                            _ => TokenKind::Name(name),
+                        };
+                        self.chomp(kind, offset)
                     }
                 },
                 State::Comment => {
