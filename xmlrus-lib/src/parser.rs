@@ -1,29 +1,26 @@
-use crate::error;
 use crate::error::ParseResult;
-use crate::lexer::Token;
+use crate::lexer::Lexer;
 use crate::lexer::TokenKind;
-use crate::parse_name;
 
 struct TokenStream<'a> {
-    tokens: Vec<Token<'a>>,
-    pos: usize,
+    lexer: Lexer<'a>,
 }
 
 impl<'a> TokenStream<'a> {
     fn current(&self) -> TokenKind<'a> {
-        self.tokens[self.pos].kind
+        self.lexer.current_token().kind
     }
 
-    fn previous(&self) -> TokenKind<'a> {
-        self.tokens[self.pos - 1].kind
+    fn previous(&self) -> Option<TokenKind<'a>> {
+        Some(self.lexer.prev_token()?.kind)
     }
 
     fn is(&self, kind: TokenKind) -> bool {
-        self.current() == kind
+        self.lexer.current_token().kind == kind
     }
 
     fn advance(&mut self) {
-        self.pos += 1;
+        let _ = self.lexer.next_token();
     }
 
     fn expect(&mut self, kind: TokenKind) -> ParseResult<()> {
@@ -36,21 +33,20 @@ impl<'a> TokenStream<'a> {
         Ok(())
     }
 
-    fn consume_whitespace(&mut self) -> bool {
-        if let TokenKind::Whitespace(_) = self.current() {
-            self.advance();
-            return true;
-        }
-
-        false
-    }
-
-    fn expect_whitespace(&mut self) -> ParseResult<()> {
+    fn expect_whitespace(&mut self, reason: &str) -> ParseResult<()> {
         if let TokenKind::Whitespace(_) = self.current() {
             self.advance();
             Ok(())
         } else {
-            panic!("Expected whitespace");
+            panic!("Missing expected whitespace {reason}");
+        }
+    }
+
+    fn expect_preceeding_whitespace(&self, before: &str) -> ParseResult<()> {
+        if let Some(TokenKind::Whitespace(_)) = self.previous() {
+            Ok(())
+        } else {
+            panic!("Missing expected whitespace before {before}")
         }
     }
 
@@ -65,16 +61,36 @@ impl<'a> TokenStream<'a> {
 
     fn expect_and_get_name(&mut self) -> ParseResult<&'a str> {
         if let TokenKind::Name(name) = self.current() {
+            self.advance();
             Ok(name)
         } else {
             panic!("expected name")
         }
     }
+
+    fn expect_and_get_comment(&mut self) -> ParseResult<&'a str> {
+        if let TokenKind::Comment(comment) = self.current() {
+            self.advance();
+            Ok(comment)
+        } else {
+            panic!("expected comment")
+        }
+    }
+
+    fn consume_whitespace(&mut self) -> bool {
+        if let TokenKind::Whitespace(_) = self.current() {
+            self.advance();
+            return true;
+        }
+
+        false
+    }
 }
 
-pub fn parse<'a>(tokens: Vec<Token<'a>>) {
-    let mut stream = TokenStream { tokens, pos: 0 };
-    parse_document(&mut stream);
+pub fn parse<'a>(source: &'a str) {
+    let lexer = Lexer::new(source);
+    let mut stream = TokenStream { lexer };
+    let _ = parse_document(&mut stream);
 }
 
 /// Parses the source input, emitting a stream of tokens to build up the
@@ -102,45 +118,52 @@ fn parse_document<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 
 /// [9] EntityValue  ::=  '"' ([^%&"] | PEReference | Reference)* '"' |  "'" ([^%&'] | PEReference | Reference)* "'"
 fn parse_entity_value<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_entity_value")
 }
 
 /// [10]  AttValue  ::=  '"' ([^<&"] | Reference)* '"' |  "'" ([^<&'] | Reference)* "'"
 fn parse_attribute_value<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_attribute_value")
 }
 
 /// [11] SystemLiteral  ::=  ('"' [^"]* '"') | ("'" [^']* "'")
 fn parse_system_literal<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_system_literal")
 }
 
 /// [12] PubidLiteral  ::=  '"' PubidChar* '"' | "'" (PubidChar - "'")* "'"
 /// [13] PubidChar     ::=  #x20 | #xD | #xA | [a-zA-Z0-9] | [-'()+,./:=?;!*#@$_%]
 fn parse_public_id_literal<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_public_id_literal")
 }
 
 /// [14]  CharData  ::=  [^<&]* - ([^<&]* ']]>' [^<&]*)
 fn parse_chardata<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_chardata")
 }
 
 /// [15]  Comment  ::=  '<!--' ((Char - '-') | ('-' (Char - '-')))* '-->'
 fn parse_comment<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
+    // TODO: Add node
+    let _comment = stream.expect_and_get_comment()?;
     Ok(())
 }
 
 /// [16] PI        ::=   '<?' PITarget  (S (Char* - ( Char* '?>' Char*)))? '?>'
 /// [17] PITarget  ::=   Name - (('X' | 'x') ('M' | 'm') ('L' | 'l'))
 fn parse_processing_instruction<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
+    stream.expect(TokenKind::PIStart)?;
+    let _name = stream.expect_and_get_name()?;
+
+    stream.consume_whitespace();
+
+    if let TokenKind::CharData(_cdata) = stream.current() {
+        stream.expect_preceeding_whitespace("PI CharData")?;
+        stream.advance();
+    }
+
+    // TODO: Add node
+    stream.expect(TokenKind::PIEnd)?;
     Ok(())
 }
 
@@ -149,8 +172,7 @@ fn parse_processing_instruction<'a>(stream: &mut TokenStream<'a>) -> ParseResult
 /// [20] CData    ::=  (Char* - (Char* ']]>' Char*))
 /// [21] CDEnd    ::=  ']]>'
 fn parse_cdata<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_cdata")
 }
 
 /// [22] prolog  ::=  XMLDecl? Misc* (doctypedecl Misc*)?
@@ -179,24 +201,24 @@ fn parse_prolog<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 /// [81] EncName       ::=   [A-Za-z] ([A-Za-z0-9._] | '-')* /* Encoding name contains only Latin characters */
 /// [32] SDDecl        ::=   S 'standalone' Eq (("'" ('yes' | 'no') "'") | ('"' ('yes' | 'no') '"'))
 fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    stream.expect(TokenKind::XmlDeclStart);
-    stream.expect_whitespace()?;
-    stream.expect(TokenKind::Version);
-    stream.expect(TokenKind::Equal);
+    stream.expect(TokenKind::XmlDeclStart)?;
+    stream.expect_whitespace("before document version")?;
+    stream.expect(TokenKind::Version)?;
+    stream.expect(TokenKind::Equal)?;
 
     let version = stream.expect_and_get_literal()?;
     if !version.starts_with("1.0") {
         panic!("version must be 1.x")
     }
 
-    let encoding = {
+    let _encoding = {
         let ws = stream.consume_whitespace();
         if let TokenKind::Encoding = stream.current() {
             if !ws {
                 panic!("missing required ws before encoding");
             }
             stream.advance();
-            stream.expect(TokenKind::Equal);
+            stream.expect(TokenKind::Equal)?;
 
             // TODO: encoding validation
             let encoding = stream.expect_and_get_literal();
@@ -206,14 +228,14 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
         }
     };
 
-    let standalone = {
+    let _standalone = {
         let ws = stream.consume_whitespace();
         if let TokenKind::Standalone = stream.current() {
             if !ws {
                 panic!("missing required ws before standalone");
             }
             stream.advance();
-            stream.expect(TokenKind::Equal);
+            stream.expect(TokenKind::Equal)?;
 
             // TODO: standalone validation
             let standalone = stream.expect_and_get_literal()?;
@@ -229,7 +251,7 @@ fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 
     // TODO: add node
     stream.consume_whitespace();
-    stream.expect(TokenKind::XmlDeclEnd);
+    stream.expect(TokenKind::XmlDeclEnd)?;
 
     Ok(())
 }
@@ -255,11 +277,11 @@ fn parse_misc<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 /// [29]  markupdecl  ::=   elementdecl | AttlistDecl | EntityDecl | NotationDecl | PI | Comment
 fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
     stream.advance();
-    stream.expect_whitespace()?;
+    stream.expect_whitespace("before DTD name")?;
 
     // TODO: add document name
-    let name = stream.expect_and_get_name()?;
-    if let Some((system_id, public_id)) = parse_external_id(stream, false)? {
+    let _name = stream.expect_and_get_name()?;
+    if let Some((_system_id, _public_id)) = parse_external_id(stream, false)? {
         // TODO: add entity
     }
 
@@ -295,47 +317,41 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 /// [39] element  ::=  EmptyElemTag | STag content ETag
 fn parse_element<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
     parse_element_start(stream)?;
-
-    Ok(())
+    unimplemented!("parse_element")
 }
 
 /// [40] STag          ::= '<' QName (S Attribute)* S? '>'
 /// [44] EmptyElemTag  ::= '<' QName (S Attribute)* S? '/>'
 fn parse_element_start<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
     stream.expect(TokenKind::OpenTagStart)?;
-    let name = stream.expect_and_get_name()?;
-    Ok(())
+    let _name = stream.expect_and_get_name()?;
+    unimplemented!("parse_element_start")
 }
 
 /// [42]  ETag  ::=  '</' Name S? '>'
 fn parse_etag<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_etag")
 }
 
 /// [43] content  ::=  CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
 fn parse_content<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_content")
 }
 
 /// [45] elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
 /// [46] contentspec  ::=  'EMPTY' | 'ANY' | Mixed | children
 fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_element_type_decl")
 }
 
 /// [52] AttlistDecl  ::=  '<!ATTLIST' S Name AttDef* S? '>'
 fn parse_attlist_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_attlist_decl")
 }
 
 /// [53] AttDef         ::=  S Name S AttType S DefaultDecl
 fn parse_att_def<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_att_def")
 }
 
 /// [54] AttType        ::=  StringType | TokenizedType | EnumeratedType
@@ -348,32 +364,28 @@ fn parse_att_def<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 ///                     | 'NMTOKEN'
 ///                     | 'NMTOKENS'
 fn parse_att_type<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_att_type")
 }
 
 /// [57]  EnumeratedType  ::=  NotationType | Enumeration
 fn parse_enumerated_type<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_enumeration_type")
 }
 
 /// [58]  NotationType  ::=  'NOTATION' S '(' S? Name (S? '|' S? Name)* S? ')'
 fn parse_notation_type<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_notation_type")
 }
 
 /// [59]  Enumeration  ::=  '(' S? Nmtoken (S? '|' S? Nmtoken)* S? ')'
 fn parse_enumeration<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_enumeration")
 }
 
 /// [69]  PEReference  ::= '%' Name ';'
 fn parse_pe_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    stream.expect(TokenKind::Percent);
-    let name = stream.expect_and_get_name()?;
+    stream.expect(TokenKind::Percent)?;
+    let _name = stream.expect_and_get_name()?;
     stream.expect(TokenKind::SemiColon)?;
 
     // TODO: add reference
@@ -384,20 +396,50 @@ fn parse_pe_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 /// [71] GEDecl      ::=  '<!ENTITY' S Name S EntityDef S? '>'
 /// [72] PEDecl      ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
 fn parse_entity_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
+    stream.expect(TokenKind::EntityDecl)?;
+    stream.expect_whitespace("after EntityDecl")?;
+
+    if let TokenKind::Percent = stream.current() {
+        parse_pe_def(stream)?;
+    } else {
+        parse_entity_def(stream)?;
+    }
+
+    stream.consume_whitespace();
+    stream.expect(TokenKind::MarkupDeclEnd)?;
+
     Ok(())
 }
 
 /// [73] EntityDef   ::=  EntityValue | (ExternalID NDataDecl?)
 fn parse_entity_def<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
+    let _name = stream.expect_and_get_name()?;
+    stream.expect_whitespace("after EntityDecl name")?;
+
+    if let TokenKind::Literal(_entity_value) = stream.current() {
+        // TODO: Add EntityType::InternalGeneral { entity_value }
+        stream.advance();
+        return Ok(());
+    }
+
+    // `parse_external_id()` will already bubble an error for a missing/malformed ExternalId
+    // so it should be safe to use `expect()` here.
+    let (_system_id, _public_id) = parse_external_id(stream, true)?.expect("missing required ExternalId in EntityDef");
+    stream.consume_whitespace();
+
+    if let TokenKind::NData = stream.current() {
+        // TODO: Add EntityType::ExernalGeneralUnparsed { system_id, public_id, ndata}
+        let _ndata = parse_ndata_decl(stream)?;
+    } else {
+        // TODO: Add EntityType::ExernalGeneralParsed { system_id, public_id }
+    }
+
     Ok(())
 }
 
 /// [74]  PEDef  ::=  EntityValue | ExternalID
 fn parse_pe_def<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_pe_def")
 }
 
 /// [75] ExternalID  ::=  'SYSTEM' S SystemLiteral | 'PUBLIC' S PubidLiteral S SystemLiteral
@@ -405,18 +447,20 @@ fn parse_external_id<'a>(
     stream: &mut TokenStream<'a>,
     required: bool,
 ) -> ParseResult<Option<(&'a str, Option<&'a str>)>> {
-    let has_ws = stream.consume_whitespace();
+    stream.consume_whitespace();
 
     if stream.is(TokenKind::System) {
-        stream.expect_whitespace()?;
+        stream.advance();
+        stream.expect_whitespace("ExternalID SystemLiteral")?;
         let system_id = stream.expect_and_get_literal()?;
         return Ok(Some((system_id, None)));
     }
 
     if stream.is(TokenKind::Public) {
-        stream.expect_whitespace()?;
+        stream.advance();
+        stream.expect_whitespace("ExternalId PubidLiteral")?;
         let public_id = stream.expect_and_get_literal()?;
-        stream.expect_whitespace()?;
+        stream.expect_whitespace("ExternalID SystemLiteral")?;
         let system_id = stream.expect_and_get_literal()?;
 
         return Ok(Some((system_id, Some(public_id))));
@@ -430,14 +474,15 @@ fn parse_external_id<'a>(
 }
 
 /// [76] NDataDecl  ::=  S 'NDATA' S Name
-fn parse_ndata_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+fn parse_ndata_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
+    stream.expect_preceeding_whitespace("NDATA")?;
+    stream.expect(TokenKind::NData)?;
+    stream.expect_whitespace("after NDATA")?;
+    Ok(stream.expect_and_get_name()?)
 }
 
 /// [82] NotationDecl  ::=  '<!NOTATION' S Name S (ExternalID | PublicID) S? '>'
 /// [83] PublicID      ::=  'PUBLIC' S PubidLiteral
 fn parse_notation_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    // TODO
-    Ok(())
+    unimplemented!("parse_notation_decl")
 }

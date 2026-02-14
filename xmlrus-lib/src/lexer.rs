@@ -18,8 +18,6 @@ pub enum TokenKind<'a> {
     IntSubsetEnd,
 
     // === markupdecl ===
-    /// `<`
-    MarkupDeclStart,
     /// `>`
     MarkupDeclEnd,
     /// `<![CDATA[`
@@ -152,7 +150,6 @@ impl<'a> Debug for TokenKind<'a> {
             Self::DTDStart => write!(f, "DocTypeDeclStart"),
             Self::IntSubsetStart => write!(f, "IntSubsetStart"),
             Self::IntSubsetEnd => write!(f, "IntSubsetEnd"),
-            Self::MarkupDeclStart => write!(f, "MarkupDeclStart"),
             Self::MarkupDeclEnd => write!(f, "MarkupDeclEnd"),
             Self::CDStart => write!(f, "CDStart"),
             Self::CDEnd => write!(f, "CDEnd"),
@@ -192,7 +189,7 @@ impl<'a> Debug for TokenKind<'a> {
             Self::EmptyTagEnd => write!(f, "EmptyTagEnd"),
             Self::TagEnd => write!(f, "TagEnd"),
             Self::AttributeValue(value) => write!(f, "AttributeValue(\"{value}\")"),
-            Self::CharData(char_data) => write!(f, "CharData(\"{}\")", char_data.replace("\n", "")),
+            Self::CharData(char_data) => write!(f, "CharData(\"{char_data:#?}\")"), //, char_data.replace("\n", "")),
             Self::Percent => write!(f, "Percent"),
             Self::SemiColon => write!(f, "SemiColon"),
             Self::Comment(comment) => write!(f, "Comment(\"{comment}\")"),
@@ -268,11 +265,50 @@ enum State {
     CData,
 }
 
-pub fn tokenize<'a>(source: &'a str) -> Vec<Token<'a>> {
-    let stream = InputStream::new(source);
-    let mut tokens: Vec<_> = stream.collect();
-    tokens.push(Token::new(TokenKind::Eof, source.len()));
-    tokens
+pub struct Lexer<'a> {
+    stream: InputStream<'a>,
+    current_token: Token<'a>,
+    prev_token: Option<Token<'a>>,
+}
+
+impl<'a> Lexer<'a> {
+    pub fn new(source: &'a str) -> Self {
+        let mut stream = InputStream::new(source);
+        let current_token = stream.next().unwrap_or(Token::new(TokenKind::Eof, source.len()));
+
+        Self {
+            stream,
+            current_token,
+            prev_token: None,
+        }
+    }
+
+    /// Pulls the next token and returns the current
+    pub fn next_token(&mut self) -> Token<'a> {
+        match self.stream.next() {
+            Some(token) => {
+                let current = self.current_token;
+                self.prev_token = Some(current);
+                self.current_token = token;
+                println!("{current:?}");
+                token
+            }
+            None => {
+                let eof = Token::new(TokenKind::Eof, self.stream.pos);
+                self.prev_token = Some(self.current_token);
+                self.current_token = eof;
+                eof
+            }
+        }
+    }
+
+    pub fn prev_token(&self) -> Option<Token<'a>> {
+        self.prev_token
+    }
+
+    pub fn current_token(&self) -> Token<'a> {
+        self.current_token
+    }
 }
 
 pub struct InputStream<'a> {
@@ -439,6 +475,7 @@ impl<'a> Iterator for InputStream<'a> {
             Some(b) => match self.state {
                 // 	CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
                 State::Default => match b {
+                    b' ' | b'\t' | b'\r' | b'\n' => self.chomp_ws(),
                     b'<' if self.starts_with("<?xml") => {
                         self.set_state(State::XmlDecl);
                         self.chomp_back(TokenKind::XmlDeclStart, 5)
@@ -517,8 +554,8 @@ impl<'a> Iterator for InputStream<'a> {
                         }
                     }
 
-                    let comment = self.slice_from(offset);
                     self.advance(3);
+                    let comment = self.slice_from(offset);
                     self.set_state(self.prev_state);
                     self.chomp(TokenKind::Comment(comment), offset)
                 }
@@ -533,7 +570,7 @@ impl<'a> Iterator for InputStream<'a> {
                         while let Some(b) = self.current_byte() {
                             match b {
                                 b'?' if self.starts_with("?>") => break,
-                                b if self.is_ws(b) => break,
+                                b if self.is_ws(b) && !target_chomped => break,
                                 _ => self.advance(1),
                             }
                         }
@@ -918,13 +955,12 @@ mod test {
         let mut stream = InputStream::new(&source);
 
         next!(stream, XmlDeclStart);
-        next!(stream, Name("xml"));
         next!(stream, Whitespace(" "));
-        next!(stream, Name("version"));
+        next!(stream, Version);
         next!(stream, Equal);
         next!(stream, Literal("1.0"));
         next!(stream, Whitespace(" "));
-        next!(stream, Name("encoding"));
+        next!(stream, Encoding);
         next!(stream, Equal);
         next!(stream, Literal("UTF-8"));
         next!(stream, XmlDeclEnd);
@@ -936,7 +972,6 @@ mod test {
         let mut stream = InputStream::new(&source);
 
         next!(stream, XmlDeclStart);
-        next!(stream, Name("xml"));
         next!(stream, XmlDeclEnd);
     }
 
@@ -946,7 +981,6 @@ mod test {
         let mut stream = InputStream::new(&source);
 
         next!(stream, XmlDeclStart);
-        next!(stream, Name("xml"));
         next!(stream, Whitespace("\t\t\n"));
         next!(stream, XmlDeclEnd);
     }
@@ -957,7 +991,6 @@ mod test {
         let mut stream = InputStream::new(&source);
 
         next!(stream, XmlDeclStart);
-        next!(stream, Name("xml"));
         next!(stream, Whitespace(" "));
         next!(stream, Name("foo"));
         next!(stream, Whitespace(" "));

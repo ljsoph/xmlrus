@@ -10,6 +10,8 @@ use error::SyntaxError;
 use error::ValidationError;
 
 pub mod error;
+pub mod lexer;
+pub mod parser;
 mod pretty;
 mod validate;
 
@@ -367,6 +369,7 @@ impl<'a> TokenStream<'a> {
             len: source.len(),
         }
     }
+
     fn advance(&mut self, amount: usize) {
         self.pos += amount;
     }
@@ -1700,6 +1703,7 @@ fn parse_element<'a>(
     let mut is_open = false;
     while !stream.is_at_end() {
         match stream.unchecked_current_byte() {
+            b' ' | b'\t' | b'\r' | b'\n' => stream.advance(1),
             b'>' => {
                 stream.advance(1);
                 is_open = true;
@@ -1722,7 +1726,12 @@ fn parse_element<'a>(
             }
             _ => {
                 // Attributes need leading white space
-                stream.expect_and_consume_whitespace("before attribute")?;
+                if !stream.has_preceeding_whitespace() {
+                    return Err(error::syntax(
+                        SyntaxError::MissingRequiredWhitespace { at: "before attribute" },
+                        stream,
+                    ));
+                }
 
                 let (qname, value) = parse_attribute(stream, ctx)?;
                 let QName { prefix, local } = qname;
