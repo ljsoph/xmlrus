@@ -1,6 +1,7 @@
 use crate::error::ParseResult;
 use crate::lexer::Lexer;
 use crate::lexer::TokenKind;
+use crate::lexer::TokenizedType;
 
 struct TokenStream<'a> {
     lexer: Lexer<'a>,
@@ -74,6 +75,15 @@ impl<'a> TokenStream<'a> {
             Ok(comment)
         } else {
             panic!("expected comment")
+        }
+    }
+
+    fn expect_and_get_nmtoken(&mut self) -> ParseResult<&'a str> {
+        if let TokenKind::NmToken(nmtoken) = self.current() {
+            self.advance();
+            Ok(nmtoken)
+        } else {
+            panic!("expected nmtoken")
         }
     }
 
@@ -341,17 +351,81 @@ fn parse_content<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 /// [45] elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
 /// [46] contentspec  ::=  'EMPTY' | 'ANY' | Mixed | children
 fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_element_type_decl")
+    stream.advance();
+    stream.expect_whitespace("before ElementDecl Name")?;
+
+    let _name = stream.expect_and_get_name()?;
+    stream.expect_whitespace("after ElementDecl Name")?;
+
+    match stream.current() {
+        TokenKind::Empty => (),
+        TokenKind::Any => (),
+        TokenKind::LeftParen => {
+            stream.advance();
+            stream.consume_whitespace();
+            if let TokenKind::PCData = stream.current() {
+                parse_mixed(stream)?;
+            } else {
+                parse_element_content_children(stream)?;
+            }
+        }
+        kind => panic!("expected [Empty | Any | '('], got {kind:?}"),
+    }
+
+    Ok(())
+}
+
+/// [47] children  ::=   (choice | seq) ('?' | '*' | '+')?
+/// [48] cp        ::=   (Name | choice | seq) ('?' | '*' | '+')?
+/// [49] choice    ::=   '(' S? cp ( S? '|' S? cp )+ S? ')'	[VC: Proper Group/PE Nesting]
+/// [50] seq       ::=   '(' S? cp ( S? ',' S? cp )* S? ')'	[VC: Proper Group/PE Nesting]
+fn parse_element_content_children<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    // Leading '(' and any whitespace was already consumed
+    unimplemented!("parse_element_content_children")
+}
+
+/// [51] Mixed  ::=  '(' S? '#PCDATA' (S? '|' S? Name)* S? ')*' | '(' S? '#PCDATA' S? ')'
+fn parse_mixed<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    unimplemented!("parse_mixed")
 }
 
 /// [52] AttlistDecl  ::=  '<!ATTLIST' S Name AttDef* S? '>'
 fn parse_attlist_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_attlist_decl")
+    stream.advance();
+    stream.expect_whitespace("after AttlistDecl")?;
+
+    let _name = stream.expect_and_get_name()?;
+    loop {
+        match stream.current() {
+            TokenKind::MarkupDeclEnd | TokenKind::Eof => break,
+            TokenKind::Whitespace(_) => stream.advance(),
+            _ => {
+                // TODO: Do something with AttDef
+                parse_att_def(stream)?;
+            }
+        }
+    }
+
+    // TODO: Add AttributeDecl
+    stream.expect(TokenKind::MarkupDeclEnd)?;
+
+    Ok(())
 }
 
-/// [53] AttDef         ::=  S Name S AttType S DefaultDecl
+/// [53] AttDef  ::=  S Name S AttType S DefaultDecl
 fn parse_att_def<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_att_def")
+    stream.consume_whitespace();
+
+    if let TokenKind::Name(_name) = stream.current() {
+        stream.expect_preceeding_whitespace("AttDef name")?;
+        stream.advance();
+        stream.expect_whitespace("after AttDef name")?;
+        parse_att_type(stream)?;
+        stream.expect_whitespace("after AttType")?;
+        parse_default_decl(stream)?;
+    }
+
+    Ok(())
 }
 
 /// [54] AttType        ::=  StringType | TokenizedType | EnumeratedType
@@ -364,22 +438,123 @@ fn parse_att_def<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 ///                     | 'NMTOKEN'
 ///                     | 'NMTOKENS'
 fn parse_att_type<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_att_type")
+    match stream.current() {
+        TokenKind::CData => (),
+        TokenKind::TokenizedType(tt) => {
+            // TODO: Something with me
+            match tt {
+                TokenizedType::Id => (),
+                TokenizedType::IdRef => (),
+                TokenizedType::IdRefs => (),
+                TokenizedType::Entity => (),
+                TokenizedType::Entities => (),
+                TokenizedType::NmToken => (),
+                TokenizedType::NmTokens => (),
+            }
+            stream.advance();
+        }
+        _ => parse_enumerated_type(stream)?,
+    }
+
+    Ok(())
 }
 
 /// [57]  EnumeratedType  ::=  NotationType | Enumeration
 fn parse_enumerated_type<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_enumeration_type")
+    match stream.current() {
+        TokenKind::NotationType => parse_notation_type(stream)?,
+        TokenKind::Enumeration => parse_enumeration(stream)?,
+        kind => panic!("expected [NotationType | Enumeration], got {kind:?}"),
+    }
+
+    Ok(())
 }
 
 /// [58]  NotationType  ::=  'NOTATION' S '(' S? Name (S? '|' S? Name)* S? ')'
 fn parse_notation_type<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_notation_type")
+    stream.advance();
+    stream.expect_whitespace("after NOTATION")?;
+    stream.expect(TokenKind::LeftParen)?;
+    stream.consume_whitespace();
+
+    let mut names = vec![stream.expect_and_get_name()?];
+
+    loop {
+        match stream.current() {
+            TokenKind::RightParen => break,
+            TokenKind::Whitespace(_) => stream.advance(),
+            TokenKind::Pipe => {
+                stream.advance();
+                stream.consume_whitespace();
+                names.push(stream.expect_and_get_name()?);
+            }
+            kind => panic!("expected [Name | '|' | ')'], got {kind:?}"),
+        }
+    }
+
+    // TODO: Collect names and generate AttType::Enumerated(EnumeratedType::NotationType(names))
+    stream.expect(TokenKind::RightParen)?;
+
+    Ok(())
 }
 
 /// [59]  Enumeration  ::=  '(' S? Nmtoken (S? '|' S? Nmtoken)* S? ')'
 fn parse_enumeration<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_enumeration")
+    stream.advance();
+    stream.expect(TokenKind::LeftParen)?;
+    stream.consume_whitespace();
+
+    let mut nmtokens = vec![stream.expect_and_get_nmtoken()?];
+
+    loop {
+        match stream.current() {
+            TokenKind::RightParen => break,
+            TokenKind::Whitespace(_) => stream.advance(),
+            TokenKind::Pipe => {
+                stream.advance();
+                stream.consume_whitespace();
+                nmtokens.push(stream.expect_and_get_nmtoken()?);
+            }
+            kind => panic!("expected [NmToken | '|' | ')'], got {kind:?}"),
+        }
+    }
+
+    // TODO: Collect names and generate AttType::Enumerated(EnumeratedType::Enumeration(nmtokens))
+    stream.expect(TokenKind::RightParen)?;
+
+    Ok(())
+}
+
+/// [60]  DefaultDecl  ::=  '#REQUIRED' | '#IMPLIED' | (('#FIXED' S)? AttValue)
+fn parse_default_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    // TODO: Return type
+    match stream.current() {
+        TokenKind::Required => {
+            stream.advance();
+            // Ok(DefaultDecl::Required)
+            Ok(())
+        }
+        TokenKind::Implied => {
+            stream.advance();
+            // Ok(DefaultDecl::Implied)
+            Ok(())
+        }
+        TokenKind::Fixed => {
+            stream.advance();
+            let current = stream.current();
+            if let TokenKind::Literal(_value) = current {
+                // Ok(DefaultDecl::Fixed { fixed: true, value })
+                Ok(())
+            } else {
+                panic!("expected AttValue, got {current:?}")
+            }
+        }
+        TokenKind::Literal(_value) => {
+            // Ok(DefaultDecl::Fixed { fixed: false, value})
+            Ok(())
+        }
+        kind => panic!("expected DefaultDecl, got {kind:?}"),
+    }
 }
 
 /// [69]  PEReference  ::= '%' Name ';'
