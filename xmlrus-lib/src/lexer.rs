@@ -32,10 +32,6 @@ pub enum TokenKind<'a> {
     AttlistDecl,
     /// `<!NOTATION`
     NotationDecl,
-    /// Marks incoming EntityDef
-    GEDecl,
-    /// Marks incoming PEDef
-    PEDecl,
     /// `NDATA`
     NData,
     /// `PUBLIC`
@@ -157,8 +153,6 @@ impl<'a> Debug for TokenKind<'a> {
             Self::EntityDecl => write!(f, "EntityDecl"),
             Self::AttlistDecl => write!(f, "AttlistDecl"),
             Self::NotationDecl => write!(f, "NotationDecl"),
-            Self::GEDecl => write!(f, "GEDecl"),
-            Self::PEDecl => write!(f, "PEDecl"),
             Self::NData => write!(f, "NDATA"),
             Self::NotationType => write!(f, "NOTATION"),
             Self::Public => write!(f, "Public"),
@@ -744,15 +738,15 @@ impl<'a> Iterator for InputStream<'a> {
                     _ => self.chomp_single(TokenKind::Unreachable("Invalid character in DefaultDecl")),
                 },
                 State::EntityDecl => match b {
+                    b if self.is_ws(b) => self.chomp_ws(),
                     b'>' => {
                         self.set_state(State::IntSubset);
                         self.chomp_single(TokenKind::MarkupDeclEnd)
                     }
                     b'%' => {
                         self.state = State::PEDef;
-                        self.chomp_single(TokenKind::PEDecl)
+                        self.next()
                     }
-                    b if self.is_ws(b) => self.chomp_ws(),
                     _ => {
                         let offset = self.pos;
                         let name = self.chomp_name()?;
@@ -761,15 +755,36 @@ impl<'a> Iterator for InputStream<'a> {
                     }
                 },
                 State::PEDef => match b {
-                    q @ b'\'' | q @ b'"' => self.chomp_literal(q),
-                    _ => {
-                        self.state = State::ExternalId;
+                    b if self.is_ws(b) => self.chomp_ws(),
+                    b'%' => self.chomp_single(TokenKind::Percent),
+                    b'>' => {
+                        self.set_state(State::EntityDecl);
                         self.next()
+                    }
+                    q @ b'\'' | q @ b'"' => {
+                        self.set_state(State::EntityDecl);
+                        self.chomp_literal(q)
+                    }
+                    b if self.starts_with("SYSTEM") || self.starts_with("PUBLIC") => {
+                        self.set_state(State::ExternalId);
+                        self.next()
+                    }
+                    _ => {
+                        let offset = self.pos;
+                        let name = self.chomp_name()?;
+                        self.chomp(TokenKind::Name(name), offset)
                     }
                 },
                 State::EntityDef => match b {
-                    q @ b'\'' | q @ b'"' => self.chomp_literal(q),
                     b if self.is_ws(b) => self.chomp_ws(),
+                    b'>' => {
+                        self.set_state(State::EntityDecl);
+                        self.next()
+                    }
+                    q @ b'\'' | q @ b'"' => {
+                        self.set_state(State::EntityDecl);
+                        self.chomp_literal(q)
+                    }
                     b if self.starts_with("SYSTEM") || self.starts_with("PUBLIC") => {
                         self.set_state(State::ExternalId);
                         self.next()
@@ -780,8 +795,9 @@ impl<'a> Iterator for InputStream<'a> {
                         self.chomp_back(TokenKind::NData, 5)
                     }
                     _ => {
-                        self.set_state(State::EntityDecl);
-                        self.next()
+                        let offset = self.pos;
+                        let name = self.chomp_name()?;
+                        self.chomp(TokenKind::Name(name), offset)
                     }
                 },
                 State::NDataDecl => match b {
@@ -1012,6 +1028,124 @@ mod test {
         next!(stream, Whitespace(" "));
         next!(stream, Literal("some name"));
         next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_pe_decl_entity_value() {
+        let source = r#"<!ENTITY % foo "bar">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Percent);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("bar"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_pe_decl_external_id_system() {
+        let source = r#"<!ENTITY % foo SYSTEM "bar">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Percent);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("bar"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_pe_decl_external_id_public() {
+        let source = r#"<!ENTITY % foo PUBLIC "one" " two ">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Percent);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Public);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("one"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal(" two "));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_pe_decl_external_id_no_second_literal() {
+        let source = r#"<!ENTITY % foo PUBLIC "one">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Percent);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Public);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("one"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_pe_decl_no_space() {
+        let source = r#"<!ENTITY%foo"bar">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Percent);
+        next!(stream, Name("foo"));
+        next!(stream, Literal("bar"));
+    }
+
+    #[test]
+    fn test_pe_decl_percents() {
+        let source = r#"<!ENTITY % % % foo "bar">"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Percent);
+        next!(stream, Whitespace(" "));
+        next!(stream, Percent);
+        next!(stream, Whitespace(" "));
+        next!(stream, Percent);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("bar"));
+    }
+
+    #[test]
+    fn test_pe_decl_single_quotes() {
+        let source = r#"<!ENTITY % foo 'single quotes???'>"#;
+        let mut stream = InputStream::new(&source);
+        stream.state = State::IntSubset;
+
+        next!(stream, EntityDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Percent);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("single quotes???"));
     }
 
     #[test]

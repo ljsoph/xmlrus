@@ -575,7 +575,12 @@ fn parse_entity_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
     stream.expect_whitespace("after EntityDecl")?;
 
     if let TokenKind::Percent = stream.current() {
+        stream.advance();
+        stream.expect_whitespace("before PEDecl name")?;
+        let _name = stream.expect_and_get_name()?;
+        stream.expect_whitespace("after PEDecl name")?;
         parse_pe_def(stream)?;
+        stream.consume_whitespace();
     } else {
         parse_entity_def(stream)?;
     }
@@ -614,7 +619,16 @@ fn parse_entity_def<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 
 /// [74]  PEDef  ::=  EntityValue | ExternalID
 fn parse_pe_def<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_pe_def")
+    if let TokenKind::Literal(_value) = stream.current() {
+        stream.advance();
+        // TODO: Entity::new(name, EntityType::InternalGeneral { value })
+    } else {
+        let (_system_id, _public_id) =
+            parse_external_id(stream, true)?.expect("missing required ExternalId in EntityDef");
+        // TODO: Entity::new(name, EntityType::ExternalGeneralParsed { system_id, public_id })
+    }
+
+    Ok(())
 }
 
 /// [75] ExternalID  ::=  'SYSTEM' S SystemLiteral | 'PUBLIC' S PubidLiteral S SystemLiteral
