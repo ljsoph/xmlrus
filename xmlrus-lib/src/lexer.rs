@@ -965,10 +965,18 @@ mod test {
         };
     }
 
+    fn with_state(source: &'static str, state: State) -> InputStream {
+        InputStream {
+            source,
+            pos: 0,
+            state,
+            prev_state: State::Default,
+        }
+    }
+
     #[test]
     fn test_xml_decl() {
-        let source = r#"<?xml version="1.0" encoding="UTF-8"?>"#;
-        let mut stream = InputStream::new(&source);
+        let mut stream = InputStream::new(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
 
         next!(stream, XmlDeclStart);
         next!(stream, Whitespace(" "));
@@ -984,8 +992,7 @@ mod test {
 
     #[test]
     fn test_xml_decl_empty() {
-        let source = r#"<?xml?>"#;
-        let mut stream = InputStream::new(&source);
+        let mut stream = InputStream::new(r#"<?xml?>"#);
 
         next!(stream, XmlDeclStart);
         next!(stream, XmlDeclEnd);
@@ -993,8 +1000,7 @@ mod test {
 
     #[test]
     fn test_xml_decl_empty_whitespace() {
-        let source = "<?xml\t\t\n?>";
-        let mut stream = InputStream::new(&source);
+        let mut stream = InputStream::new("<?xml\t\t\n?>");
 
         next!(stream, XmlDeclStart);
         next!(stream, Whitespace("\t\t\n"));
@@ -1003,8 +1009,7 @@ mod test {
 
     #[test]
     fn test_xml_decl_random_things() {
-        let source = r#"<?xml foo bar baz?>"#;
-        let mut stream = InputStream::new(&source);
+        let mut stream = InputStream::new(r#"<?xml foo bar baz?>"#);
 
         next!(stream, XmlDeclStart);
         next!(stream, Whitespace(" "));
@@ -1018,9 +1023,7 @@ mod test {
 
     #[test]
     fn test_entity_decl_simple() {
-        let source = r#"<!ENTITY name "some name">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY name "some name">"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1032,9 +1035,7 @@ mod test {
 
     #[test]
     fn test_pe_decl_entity_value() {
-        let source = r#"<!ENTITY % foo "bar">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY % foo "bar">"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1048,9 +1049,7 @@ mod test {
 
     #[test]
     fn test_pe_decl_external_id_system() {
-        let source = r#"<!ENTITY % foo SYSTEM "bar">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY % foo SYSTEM "bar">"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1066,9 +1065,7 @@ mod test {
 
     #[test]
     fn test_pe_decl_external_id_public() {
-        let source = r#"<!ENTITY % foo PUBLIC "one" " two ">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY % foo PUBLIC "one" " two ">"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1086,9 +1083,7 @@ mod test {
 
     #[test]
     fn test_pe_decl_external_id_no_second_literal() {
-        let source = r#"<!ENTITY % foo PUBLIC "one">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY % foo PUBLIC "one">"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1104,9 +1099,7 @@ mod test {
 
     #[test]
     fn test_pe_decl_no_space() {
-        let source = r#"<!ENTITY%foo"bar">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY%foo"bar">"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Percent);
@@ -1116,9 +1109,7 @@ mod test {
 
     #[test]
     fn test_pe_decl_percents() {
-        let source = r#"<!ENTITY % % % foo "bar">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY % % % foo "bar">"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1135,9 +1126,7 @@ mod test {
 
     #[test]
     fn test_pe_decl_single_quotes() {
-        let source = r#"<!ENTITY % foo 'single quotes???'>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY % foo 'single quotes???'>"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1150,9 +1139,7 @@ mod test {
 
     #[test]
     fn test_gedecl_simple() {
-        let source = r#"<!ENTITY name "some name">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY name "some name">"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1164,9 +1151,7 @@ mod test {
 
     #[test]
     fn test_gedecl_simple_extra_whitespace() {
-        let source = r#"<!ENTITY name "some name"   >"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY name "some name"   >"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1179,9 +1164,7 @@ mod test {
 
     #[test]
     fn test_gedecl_externalid_system() {
-        let source = r#"<!ENTITY name SYSTEM "foo">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY name SYSTEM "foo">"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1195,9 +1178,7 @@ mod test {
 
     #[test]
     fn test_gedecl_externalid_public() {
-        let source = r#"<!ENTITY name PUBLIC "foo" SYSTEM "bar">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY name PUBLIC "foo" SYSTEM "bar">"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1215,9 +1196,7 @@ mod test {
 
     #[test]
     fn test_gedecl_externalid_multiple_system() {
-        let source = r#"<!ENTITY name SYSTEM "foo" SYSTEM "bar" SYSTEM>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY name SYSTEM "foo" SYSTEM "bar" SYSTEM>"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1237,9 +1216,7 @@ mod test {
 
     #[test]
     fn test_gedecl_externalid_ndata() {
-        let source = r#"<!ENTITY name SYSTEM "foo" NDATA gif>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY name SYSTEM "foo" NDATA gif>"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1257,9 +1234,7 @@ mod test {
 
     #[test]
     fn test_gedecl_externalid_backwards() {
-        let source = r#"<!ENTITY name SYSTEM "foo" PUBLIC "bar">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY name SYSTEM "foo" PUBLIC "bar">"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1277,9 +1252,7 @@ mod test {
 
     #[test]
     fn test_gedecl_externalid_no_literal() {
-        let source = r#"<!ENTITY name SYSTEMSYSTEM SYSTEM>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ENTITY name SYSTEMSYSTEM SYSTEM>"#, State::IntSubset);
 
         next!(stream, EntityDecl);
         next!(stream, Whitespace(" "));
@@ -1294,9 +1267,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_string_type() {
-        let source = r#"<!ATTLIST two chapter CDATA #REQUIRED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST two chapter CDATA #REQUIRED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1312,9 +1283,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_id() {
-        let source = r#"<!ATTLIST a attr ID #IMPLIED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST a attr ID #IMPLIED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1330,9 +1299,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_idref() {
-        let source = r#"<!ATTLIST a attr IDREF #IMPLIED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST a attr IDREF #IMPLIED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1348,9 +1315,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_idrefs() {
-        let source = r#"<!ATTLIST a attr IDREFS #IMPLIED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST a attr IDREFS #IMPLIED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1366,9 +1331,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_entity() {
-        let source = r#"<!ATTLIST a attr ENTITY #IMPLIED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST a attr ENTITY #IMPLIED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1384,9 +1347,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_entities() {
-        let source = r#"<!ATTLIST a attr ENTITIES #IMPLIED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST a attr ENTITIES #IMPLIED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1402,9 +1363,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_nmtoken() {
-        let source = r#"<!ATTLIST a attr NMTOKEN #IMPLIED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST a attr NMTOKEN #IMPLIED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1420,9 +1379,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_nmtokens() {
-        let source = r#"<!ATTLIST a attr NMTOKENS #IMPLIED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST a attr NMTOKENS #IMPLIED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1438,9 +1395,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_notation() {
-        let source = r#"<!ATTLIST b att NOTATION (a|b) #IMPLIED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST b att NOTATION (a|b) #IMPLIED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1462,9 +1417,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_notation_ws() {
-        let source = r#"<!ATTLIST b att NOTATION (  a | b    ) #IMPLIED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST b att NOTATION (  a | b    ) #IMPLIED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1490,9 +1443,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_notation_missing_parens() {
-        let source = r#"<!ATTLIST b att NOTATION #IMPLIED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST b att NOTATION #IMPLIED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1510,9 +1461,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_notation_empty_parens() {
-        let source = r#"<!ATTLIST b att NOTATION () #IMPLIED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST b att NOTATION () #IMPLIED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1531,9 +1480,7 @@ mod test {
 
     #[test]
     fn test_attlist_decl_enumuration() {
-        let source = r#"<!ATTLIST b att (a|b) #IMPLIED>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ATTLIST b att (a|b) #IMPLIED>"#, State::IntSubset);
 
         next!(stream, AttlistDecl);
         next!(stream, Whitespace(" "));
@@ -1554,9 +1501,7 @@ mod test {
 
     #[test]
     fn test_notation_decl_external_id_system() {
-        let source = r#"<!NOTATION name SYSTEM "name.txt">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!NOTATION name SYSTEM "name.txt">"#, State::IntSubset);
 
         next!(stream, NotationDecl);
         next!(stream, Whitespace(" "));
@@ -1570,9 +1515,7 @@ mod test {
 
     #[test]
     fn test_notation_decl_external_id_public() {
-        let source = r#"<!NOTATION JPGformat PUBLIC "jpg 1" "jpg 2">"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!NOTATION JPGformat PUBLIC "jpg 1" "jpg 2">"#, State::IntSubset);
 
         next!(stream, NotationDecl);
         next!(stream, Whitespace(" "));
@@ -1588,9 +1531,7 @@ mod test {
 
     #[test]
     fn test_notation_decl_public_id() {
-        let source = r#"<!NOTATION a PUBLIC "b"  >"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!NOTATION a PUBLIC "b"  >"#, State::IntSubset);
 
         next!(stream, NotationDecl);
         next!(stream, Whitespace(" "));
@@ -1605,9 +1546,7 @@ mod test {
 
     #[test]
     fn test_element_decl_empty() {
-        let source = r#"<!ELEMENT name EMPTY>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ELEMENT name EMPTY>"#, State::IntSubset);
 
         next!(stream, ElementDecl);
         next!(stream, Whitespace(" "));
@@ -1619,9 +1558,7 @@ mod test {
 
     #[test]
     fn test_element_decl_any() {
-        let source = r#"<!ELEMENT name ANY>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ELEMENT name ANY>"#, State::IntSubset);
 
         next!(stream, ElementDecl);
         next!(stream, Whitespace(" "));
@@ -1633,9 +1570,7 @@ mod test {
 
     #[test]
     fn test_element_decl_any_bad_casing() {
-        let source = r#"<!ELEMENT name any>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ELEMENT name any>"#, State::IntSubset);
 
         next!(stream, ElementDecl);
         next!(stream, Whitespace(" "));
@@ -1647,9 +1582,7 @@ mod test {
 
     #[test]
     fn test_element_decl_mixed() {
-        let source = r#"<!ELEMENT name (#PCDATA)>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ELEMENT name (#PCDATA)>"#, State::IntSubset);
 
         next!(stream, ElementDecl);
         next!(stream, Whitespace(" "));
@@ -1663,9 +1596,7 @@ mod test {
 
     #[test]
     fn test_element_decl_mixed_names() {
-        let source = r#"<!ELEMENT name (#PCDATA|a|b|c)>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ELEMENT name (#PCDATA|a|b|c)>"#, State::IntSubset);
 
         next!(stream, ElementDecl);
         next!(stream, Whitespace(" "));
@@ -1685,9 +1616,7 @@ mod test {
 
     #[test]
     fn test_element_decl_mixed_no_paren() {
-        let source = r#"<!ELEMENT name #PCDATA>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ELEMENT name #PCDATA>"#, State::IntSubset);
 
         next!(stream, ElementDecl);
         next!(stream, Whitespace(" "));
@@ -1700,9 +1629,7 @@ mod test {
 
     #[test]
     fn test_element_decl_children() {
-        let source = r#"<!ELEMENT div1 (head, (p | list | note)*, div2*)>"#;
-        let mut stream = InputStream::new(&source);
-        stream.state = State::IntSubset;
+        let mut stream = with_state(r#"<!ELEMENT div1 (head, (p | list | note)*, div2*)>"#, State::IntSubset);
 
         next!(stream, ElementDecl);
         next!(stream, Whitespace(" "));
@@ -1734,8 +1661,7 @@ mod test {
 
     #[test]
     fn test_entity_ref() {
-        let source = r#"&da_ref;"#;
-        let mut stream = InputStream::new(&source);
+        let mut stream = InputStream::new(r#"&da_ref;"#);
 
         next!(stream, EntityRef);
         next!(stream, Name("da_ref"));
@@ -1744,8 +1670,7 @@ mod test {
 
     #[test]
     fn test_entity_ref_double_ampersand() {
-        let source = r#"&&da_ref;"#;
-        let mut stream = InputStream::new(&source);
+        let mut stream = InputStream::new(r#"&&da_ref;"#);
 
         next!(stream, EntityRef);
         next!(stream, Name(""));
@@ -1755,8 +1680,7 @@ mod test {
 
     #[test]
     fn test_entity_ref_multiple_semi() {
-        let source = r#"&da_ref;;"#;
-        let mut stream = InputStream::new(&source);
+        let mut stream = InputStream::new(r#"&da_ref;;"#);
 
         next!(stream, EntityRef);
         next!(stream, Name("da_ref"));
@@ -1766,8 +1690,7 @@ mod test {
 
     #[test]
     fn test_char_ref_decimal() {
-        let source = r#"&#123;"#;
-        let mut stream = InputStream::new(&source);
+        let mut stream = InputStream::new(r#"&#123;"#);
 
         next!(stream, CharRefDecimal);
         next!(stream, Literal("123"));
@@ -1776,8 +1699,7 @@ mod test {
 
     #[test]
     fn test_char_ref_decimal_invalid_digit() {
-        let source = r#"&#123f;"#;
-        let mut stream = InputStream::new(&source);
+        let mut stream = InputStream::new(r#"&#123f;"#);
 
         next!(stream, CharRefDecimal);
         next!(stream, Literal("123"));
@@ -1787,8 +1709,7 @@ mod test {
 
     #[test]
     fn test_char_ref_decimal_invalid_digit_correction() {
-        let source = r#"<a>&#123f;</a>"#;
-        let mut stream = InputStream::new(&source);
+        let mut stream = InputStream::new(r#"<a>&#123f;</a>"#);
 
         next!(stream, OpenTagStart);
         next!(stream, Name("a"));
@@ -1804,8 +1725,7 @@ mod test {
 
     #[test]
     fn test_char_ref_hexadecimal() {
-        let source = r#"&#xff1233;"#;
-        let mut stream = InputStream::new(&source);
+        let mut stream = InputStream::new(r#"&#xff1233;"#);
 
         next!(stream, CharRefHexadecimal);
         next!(stream, Literal("ff1233"));
