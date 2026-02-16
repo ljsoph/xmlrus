@@ -372,16 +372,147 @@ fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> 
         kind => panic!("expected [Empty | Any | '('], got {kind:?}"),
     }
 
+    stream.expect(TokenKind::MarkupDeclEnd)?;
+
     Ok(())
 }
 
 /// [47] children  ::=   (choice | seq) ('?' | '*' | '+')?
 /// [48] cp        ::=   (Name | choice | seq) ('?' | '*' | '+')?
-/// [49] choice    ::=   '(' S? cp ( S? '|' S? cp )+ S? ')'	[VC: Proper Group/PE Nesting]
-/// [50] seq       ::=   '(' S? cp ( S? ',' S? cp )* S? ')'	[VC: Proper Group/PE Nesting]
+/// [49] choice    ::=   '(' S? cp ( S? '|' S? cp )+ S? ')'
+/// [50] seq       ::=   '(' S? cp ( S? ',' S? cp )* S? ')'
 fn parse_element_content_children<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    // TODO: Return Repetition
+    fn parse_repetition<'a>(stream: &mut TokenStream<'a>) -> () {
+        match stream.current() {
+            TokenKind::QuestionMark => {
+                stream.advance();
+                ()
+            }
+            TokenKind::Star => {
+                stream.advance();
+                ()
+            }
+            TokenKind::Plus => {
+                stream.advance();
+                ()
+            }
+            _ => (),
+        }
+    }
+
+    // TODO: Return ContentParticle
+    fn parse_content_particle<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+        match stream.current() {
+            TokenKind::Percent => {
+                stream.advance();
+                stream.expect_and_get_name()?;
+                stream.expect(TokenKind::SemiColon)?;
+                panic!("illegal parameter entity reference in content particle")
+            }
+            TokenKind::LeftParen => {
+                stream.advance();
+                stream.consume_whitespace();
+                let _children = parse_element_content_children(stream)?;
+                let _repetition = parse_repetition(stream);
+            }
+            TokenKind::Name(_name) => {
+                stream.advance();
+                stream.consume_whitespace();
+                let _repetition = parse_repetition(stream);
+            }
+            kind => panic!("invalid content particle [{kind:?}]"),
+        }
+        Ok(())
+    }
+
+    enum Type {
+        Seq,
+        Choice,
+    }
+
     // Leading '(' and any whitespace was already consumed
-    unimplemented!("parse_element_content_children")
+    parse_content_particle(stream)?;
+
+    let mut content_type: Option<Type> = None;
+    let mut expecting_content = false;
+
+    loop {
+        match stream.current() {
+            TokenKind::Percent => {
+                stream.advance();
+                stream.expect_and_get_name()?;
+                stream.expect(TokenKind::SemiColon)?;
+                panic!("illegal parameter entity reference in element content decl")
+            }
+            TokenKind::RightParen => {
+                if expecting_content {
+                    panic!("expected element content, got ')'")
+                }
+
+                stream.advance();
+                break;
+            }
+            TokenKind::Comma => {
+                if expecting_content {
+                    panic!("expected element content, got ','")
+                }
+
+                match content_type {
+                    None => content_type = Some(Type::Seq),
+                    Some(Type::Choice) => {
+                        panic!("invalid content separator ','")
+                    }
+                    Some(Type::Seq) => {}
+                }
+
+                stream.advance();
+                stream.consume_whitespace();
+                expecting_content = true;
+            }
+            TokenKind::Pipe => {
+                if expecting_content {
+                    panic!("expected element content, got ','")
+                }
+
+                match content_type {
+                    None => content_type = Some(Type::Choice),
+                    Some(Type::Seq) => {
+                        panic!("invalid content separator '|'")
+                    }
+                    Some(Type::Choice) => {}
+                }
+
+                stream.advance();
+                stream.consume_whitespace();
+                expecting_content = true;
+            }
+            TokenKind::LeftParen => {
+                if !expecting_content {
+                    panic!("unexpected token in left paren [{:?}]", stream.current());
+                }
+
+                stream.advance();
+                stream.consume_whitespace();
+                let _children = parse_element_content_children(stream)?;
+                let _repetition = parse_repetition(stream);
+                expecting_content = false;
+            }
+            TokenKind::Name(_name) => {
+                if !expecting_content {
+                    panic!("unexpected token in name [{:?}]", stream.current());
+                }
+
+                stream.advance();
+                stream.consume_whitespace();
+                let _repetition = parse_repetition(stream);
+                expecting_content = false;
+            }
+            kind => panic!("unexpected token [{kind:?}]"),
+        }
+    }
+
+    Ok(())
 }
 
 /// [51] Mixed  ::=  '(' S? '#PCDATA' (S? '|' S? Name)* S? ')*' | '(' S? '#PCDATA' S? ')'

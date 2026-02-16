@@ -244,11 +244,11 @@ enum State {
     NotationDecl,
     DefaultDecl,
     EntityDecl,
+    GEDecl,
+    PEDecl,
     NDataDecl,
     NotationType,
     Enumeration,
-    EntityDef,
-    PEDef,
     ExternalId,
     ContentSpec,
     ElementStart,
@@ -648,6 +648,8 @@ impl<'a> Iterator for InputStream<'a> {
                 },
                 State::AttlistDecl => match b {
                     b if self.is_ws(b) => self.chomp_ws(),
+                    b'%' => self.chomp_single(TokenKind::Percent),
+                    b';' => self.chomp_single(TokenKind::SemiColon),
                     b if self.starts_with("CDATA") => self.chomp_back(TokenKind::CData, 5),
                     b if self.starts_with("IDREFS") => {
                         self.chomp_back(TokenKind::TokenizedType(TokenizedType::IdRefs), 6)
@@ -744,17 +746,17 @@ impl<'a> Iterator for InputStream<'a> {
                         self.chomp_single(TokenKind::MarkupDeclEnd)
                     }
                     b'%' => {
-                        self.state = State::PEDef;
+                        self.state = State::PEDecl;
                         self.next()
                     }
                     _ => {
                         let offset = self.pos;
                         let name = self.chomp_name()?;
-                        self.state = State::EntityDef;
+                        self.state = State::GEDecl;
                         self.chomp(TokenKind::Name(name), offset)
                     }
                 },
-                State::PEDef => match b {
+                State::PEDecl => match b {
                     b if self.is_ws(b) => self.chomp_ws(),
                     b'%' => self.chomp_single(TokenKind::Percent),
                     b'>' => {
@@ -775,7 +777,7 @@ impl<'a> Iterator for InputStream<'a> {
                         self.chomp(TokenKind::Name(name), offset)
                     }
                 },
-                State::EntityDef => match b {
+                State::GEDecl => match b {
                     b if self.is_ws(b) => self.chomp_ws(),
                     b'>' => {
                         self.set_state(State::EntityDecl);
@@ -852,6 +854,8 @@ impl<'a> Iterator for InputStream<'a> {
                     b'*' => self.chomp_single(TokenKind::Star),
                     b'+' => self.chomp_single(TokenKind::Plus),
                     b',' => self.chomp_single(TokenKind::Comma),
+                    b'%' => self.chomp_single(TokenKind::Percent),
+                    b';' => self.chomp_single(TokenKind::SemiColon),
                     b'>' => {
                         self.set_state(State::IntSubset);
                         self.chomp_single(TokenKind::MarkupDeclEnd)
@@ -1656,6 +1660,31 @@ mod test {
         next!(stream, Name("div2"));
         next!(stream, Star);
         next!(stream, RightParen);
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_element_decl_pe_ref() {
+        // Parameter Entity References are illegal here but the lexer will not care and
+        // the parser will catch the error.
+        let mut stream = with_state(r#"<!ELEMENT div2 (%pe3; | %pe2;)*>"#, State::IntSubset);
+
+        next!(stream, ElementDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("div2"));
+        next!(stream, Whitespace(" "));
+        next!(stream, LeftParen);
+        next!(stream, Percent);
+        next!(stream, Name("pe3"));
+        next!(stream, SemiColon);
+        next!(stream, Whitespace(" "));
+        next!(stream, Pipe);
+        next!(stream, Whitespace(" "));
+        next!(stream, Percent);
+        next!(stream, Name("pe2"));
+        next!(stream, SemiColon);
+        next!(stream, RightParen);
+        next!(stream, Star);
         next!(stream, MarkupDeclEnd);
     }
 
