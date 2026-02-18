@@ -2,6 +2,7 @@ use crate::error::ParseResult;
 use crate::lexer::Lexer;
 use crate::lexer::TokenKind;
 use crate::lexer::TokenizedType;
+use crate::validate;
 
 struct TokenStream<'a> {
     lexer: Lexer<'a>,
@@ -182,7 +183,12 @@ fn parse_processing_instruction<'a>(stream: &mut TokenStream<'a>) -> ParseResult
 /// [20] CData    ::=  (Char* - (Char* ']]>' Char*))
 /// [21] CDEnd    ::=  ']]>'
 fn parse_cdata<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_cdata")
+    stream.expect(TokenKind::CDStart)?;
+    if let TokenKind::CharData(_char_data) = stream.current() {
+        stream.advance();
+    }
+    stream.expect(TokenKind::CDEnd)?;
+    Ok(())
 }
 
 /// [22] prolog  ::=  XMLDecl? Misc* (doctypedecl Misc*)?
@@ -324,28 +330,65 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
     Ok(())
 }
 
-/// [39] element  ::=  EmptyElemTag | STag content ETag
+/// [39] element       ::=  EmptyElemTag | STag content ETag
+/// [40] STag          ::=  '<' QName (S Attribute)* S? '>'
+/// [42] ETag          ::=  '</' Name S? '>'
+/// [44] EmptyElemTag  ::=  '<' QName (S Attribute)* S? '/>'
 fn parse_element<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    parse_element_start(stream)?;
-    unimplemented!("parse_element")
-}
-
-/// [40] STag          ::= '<' QName (S Attribute)* S? '>'
-/// [44] EmptyElemTag  ::= '<' QName (S Attribute)* S? '/>'
-fn parse_element_start<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
     stream.expect(TokenKind::OpenTagStart)?;
     let _name = stream.expect_and_get_name()?;
-    unimplemented!("parse_element_start")
-}
 
-/// [42]  ETag  ::=  '</' Name S? '>'
-fn parse_etag<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_etag")
+    loop {
+        match stream.current() {
+            TokenKind::EmptyTagEnd => {
+                stream.advance();
+                return Ok(());
+            }
+            TokenKind::TagEnd => {
+                stream.advance();
+                break;
+            }
+            TokenKind::Name(_name) => {
+                // TODO: Something with attribute
+                stream.expect_preceeding_whitespace("attribute name")?;
+                stream.advance();
+                stream.expect(TokenKind::Equal)?;
+                let _att_value = stream.expect_and_get_literal()?;
+            }
+            TokenKind::Whitespace(_) => stream.advance(),
+            kind => panic!("unexpected token while parsing element: {kind:?}"),
+        }
+    }
+
+    parse_content(stream)?;
+
+    stream.expect(TokenKind::TagEndStart)?;
+    let _name = stream.expect_and_get_name()?;
+    stream.consume_whitespace();
+    stream.expect(TokenKind::TagEnd)?;
+
+    Ok(())
 }
 
 /// [43] content  ::=  CharData? ((element | Reference | CDSect | PI | Comment) CharData?)*
 fn parse_content<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_content")
+    loop {
+        match stream.current() {
+            TokenKind::TagEndStart => break,
+            TokenKind::Whitespace(_) => stream.advance(),
+            TokenKind::PIStart => parse_processing_instruction(stream)?,
+            TokenKind::CDStart => parse_cdata(stream)?,
+            TokenKind::Comment(_) => parse_comment(stream)?,
+            TokenKind::OpenTagStart => parse_element(stream)?,
+            TokenKind::CharData(_char_data) => stream.advance(),
+            TokenKind::Ampersand => parse_reference(stream)?,
+            kind => panic!("unexpected token while parsing content: {kind:?}"),
+        }
+    }
+
+    stream.consume_whitespace();
+
+    Ok(())
 }
 
 /// [45] elementdecl  ::=  '<!ELEMENT' S Name S contentspec S? '>'
@@ -686,6 +729,48 @@ fn parse_default_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
         }
         kind => panic!("expected DefaultDecl, got {kind:?}"),
     }
+}
+
+/// [66]  CharRef  ::=  &#' [0-9]+ ';' | '&#x' [0-9a-fA-F]+ ';'
+/// [67]  Reference  ::=  EntityRef | CharRef
+/// [68]  EntityRef  ::=  '&' Name ';'
+fn parse_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    stream.advance();
+
+    match stream.current() {
+        TokenKind::Pound => {
+            stream.advance();
+
+            if let TokenKind::ReferenceValue(val) = stream.current() {
+                stream.advance();
+                if val.starts_with("x") {
+                    // TODO: Validate hexadecimal
+                } else {
+                    // TODO: Validate decimal
+                }
+            } else {
+                panic!("unexpected token while parsing CharRef: {:?}", stream.current())
+            }
+        }
+        TokenKind::ReferenceValue(val) => {
+            validate::is_valid_name2(val)?;
+            stream.advance();
+        }
+        kind => panic!("unexpected token while parsing reference: {kind:?}"),
+    }
+
+    stream.expect(TokenKind::SemiColon)?;
+
+    Ok(())
+}
+
+fn parse_entity_ref<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+    // lexer parses everything between the '&' and ';' as a 'ReferenceValue' so we have
+    // to ensure we validiate here
+    stream.expect(TokenKind::Ampersand)?;
+    let _name = stream.expect_and_get_name()?;
+    stream.expect(TokenKind::SemiColon)?;
+    Ok(())
 }
 
 /// [69]  PEReference  ::= '%' Name ';'

@@ -29,6 +29,25 @@ pub fn is_valid_name(stream: &TokenStream, name: &str) -> ParseResult<()> {
     Ok(())
 }
 
+pub fn is_valid_name2(name: &str) -> ParseResult<()> {
+    let mut chars = name.char_indices();
+
+    // The first character of a Name MUST be a NameStartChar, and any other characters MUST be NameChars;
+    if let Some((_, first_char)) = chars.next()
+        && !is_name_start_char(first_char)
+    {
+        panic!("invalid name start char {first_char:?}")
+    }
+
+    for (_, value) in chars {
+        if !is_name_char(value) {
+            panic!("invalid XML name char {value:?}")
+        }
+    }
+
+    Ok(())
+}
+
 pub fn is_name_start_char(value: char) -> bool {
     let value = u32::from(value);
 
