@@ -15,10 +15,14 @@ struct Cli {
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
 
-    if let Err(err) = xmlrus::Parser::parse(cli.file) {
-        eprintln!("{}", err.diagnostic());
-        std::process::exit(1);
-    }
+    // if let Err(err) = xmlrus::Parser::parse(cli.file) {
+    //     eprintln!("{}", err.diagnostic());
+    //     std::process::exit(1);
+    // }
+
+    let source = std::fs::read_to_string(cli.file)?;
+
+    xmlrus::parser::parse(&source);
 
     Ok(())
 }

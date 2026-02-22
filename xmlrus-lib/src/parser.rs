@@ -401,12 +401,19 @@ fn parse_element_type_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> 
     stream.expect_whitespace("after ElementDecl Name")?;
 
     match stream.current() {
-        TokenKind::Empty => (),
-        TokenKind::Any => (),
+        TokenKind::Empty => {
+            // TODO
+            stream.advance();
+        }
+        TokenKind::Any => {
+            // TODO
+            stream.advance();
+        }
         TokenKind::LeftParen => {
             stream.advance();
             stream.consume_whitespace();
             if let TokenKind::PCData = stream.current() {
+                stream.advance();
                 parse_mixed(stream)?;
             } else {
                 parse_element_content_children(stream)?;
@@ -560,7 +567,31 @@ fn parse_element_content_children<'a>(stream: &mut TokenStream<'a>) -> ParseResu
 
 /// [51] Mixed  ::=  '(' S? '#PCDATA' (S? '|' S? Name)* S? ')*' | '(' S? '#PCDATA' S? ')'
 fn parse_mixed<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_mixed")
+    // '(' and whitespace already consumed
+
+    let mut names = vec![];
+    loop {
+        stream.consume_whitespace();
+
+        match stream.current() {
+            TokenKind::RightParen => {
+                stream.advance();
+                if (!names.is_empty()) {
+                    stream.expect(TokenKind::Star)?;
+                }
+                break;
+            }
+            TokenKind::Pipe => {
+                stream.advance();
+                stream.consume_whitespace();
+                names.push(stream.expect_and_get_name()?);
+            }
+            kind => panic!("unexpected token in Mixed Content Decl: {kind:?}"),
+        }
+    }
+
+    // TODO: Emit MixedContent
+    Ok(())
 }
 
 /// [52] AttlistDecl  ::=  '<!ATTLIST' S Name AttDef* S? '>'
@@ -889,5 +920,42 @@ fn parse_ndata_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
 /// [82] NotationDecl  ::=  '<!NOTATION' S Name S (ExternalID | PublicID) S? '>'
 /// [83] PublicID      ::=  'PUBLIC' S PubidLiteral
 fn parse_notation_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    unimplemented!("parse_notation_decl")
+    stream.advance();
+    stream.expect_whitespace("after <!NOTATION")?;
+    let _name = stream.expect_and_get_name()?;
+    stream.expect_whitespace("after NotationDecl name")?;
+
+    // Three paths we can take
+    // 1: SYSTEM SystemLiteral
+    // 2: PUBLIC PubidLiteral
+    // 3: PUBLIC PubidLiteral SystemLiteral
+    let current = stream.current();
+    match stream.current() {
+        TokenKind::System => {
+            stream.advance();
+            stream.expect_whitespace("After SYSTEM in NotationDecl")?;
+            let system_id = stream.expect_and_get_literal()?;
+        }
+        TokenKind::Public => {
+            stream.advance();
+            stream.expect_whitespace("After PUBLIC in NotationDecl")?;
+            let _public_id = stream.expect_and_get_literal()?;
+
+            let _system_id = {
+                stream.consume_whitespace();
+                if let TokenKind::Literal(_system_id) = stream.current() {
+                    stream.expect_preceeding_whitespace("System Literal in Notation Decl")?;
+                    Some(_system_id)
+                } else {
+                    None
+                }
+            };
+        }
+        kind => panic!("expected ExternalId or PublicId in NotationDecl, got {kind:?}"),
+    }
+
+    stream.consume_whitespace();
+    stream.expect(TokenKind::MarkupDeclEnd)?;
+
+    Ok(())
 }

@@ -502,7 +502,7 @@ impl<'a> Iterator for InputStream<'a> {
                     }
                 },
                 State::XmlDecl => match b {
-                    q @ b'\'' | q @ b'"' => self.chomp_literal(q),
+                    q @ (b'\'' | b'"') => self.chomp_literal(q),
                     b if self.is_ws(b) => self.chomp_ws(),
                     b'=' => self.chomp_single(TokenKind::Equal),
                     b'?' if self.starts_with("?>") => {
@@ -584,7 +584,7 @@ impl<'a> Iterator for InputStream<'a> {
                     }
                 },
                 State::ExternalId => match b {
-                    q @ b'\'' | q @ b'"' => self.chomp_literal(q),
+                    q @ (b'\'' | b'"') => self.chomp_literal(q),
                     b if self.starts_with("SYSTEM") => self.chomp_back(TokenKind::System, 6),
                     b if self.starts_with("PUBLIC") => self.chomp_back(TokenKind::Public, 6),
                     b if self.is_ws(b) => self.chomp_ws(),
@@ -709,7 +709,7 @@ impl<'a> Iterator for InputStream<'a> {
                 },
                 State::DefaultDecl => match b {
                     b if self.is_ws(b) => self.chomp_ws(),
-                    q @ b'\'' | q @ b'"' => {
+                    q @ (b'\'' | b'"') => {
                         self.set_state(State::AttlistDecl);
                         self.chomp_literal(q)
                     }
@@ -751,7 +751,7 @@ impl<'a> Iterator for InputStream<'a> {
                         self.set_state(State::EntityDecl);
                         self.next()
                     }
-                    q @ b'\'' | q @ b'"' => {
+                    q @ (b'\'' | b'"') => {
                         self.set_state(State::EntityDecl);
                         self.chomp_literal(q)
                     }
@@ -771,7 +771,7 @@ impl<'a> Iterator for InputStream<'a> {
                         self.set_state(State::EntityDecl);
                         self.next()
                     }
-                    q @ b'\'' | q @ b'"' => {
+                    q @ (b'\'' | b'"') => {
                         self.set_state(State::EntityDecl);
                         self.chomp_literal(q)
                     }
@@ -801,13 +801,12 @@ impl<'a> Iterator for InputStream<'a> {
                 },
                 State::NotationDecl => match b {
                     b if self.is_ws(b) => self.chomp_ws(),
+                    q @ (b'\'' | b'"') => self.chomp_literal(q),
+                    b if self.starts_with("SYSTEM") => self.chomp_back(TokenKind::System, 6),
+                    b if self.starts_with("PUBLIC") => self.chomp_back(TokenKind::Public, 6),
                     b'>' => {
                         self.set_state(State::IntSubset);
                         self.chomp_single(TokenKind::MarkupDeclEnd)
-                    }
-                    b if self.starts_with("SYSTEM") || self.starts_with("PUBLIC") => {
-                        self.set_state(State::ExternalId);
-                        self.next()
                     }
                     _ => {
                         let offset = self.pos;
@@ -875,7 +874,7 @@ impl<'a> Iterator for InputStream<'a> {
                 },
                 State::Attributes => match b {
                     b if self.is_ws(b) => self.chomp_ws(),
-                    q @ b'\'' | q @ b'"' => self.chomp_literal(q),
+                    q @ (b'\'' | b'"') => self.chomp_literal(q),
                     b'=' => self.chomp_single(TokenKind::Equal),
                     b'>' => {
                         self.set_state(State::Default);
@@ -1734,5 +1733,68 @@ mod test {
         next!(stream, Pound);
         next!(stream, ReferenceValue("xff1233"));
         next!(stream, SemiColon);
+    }
+
+    #[test]
+    fn test_notation_decl_system() {
+        let mut stream = with_state(r#"<!NOTATION foo SYSTEM "bar">"#, State::IntSubset);
+
+        next!(stream, NotationDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("bar"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_notation_decl_mixed() {
+        let mut stream = with_state(r#"<!NOTATION foo SYSTEM PUBLICPUBLIC "bar">"#, State::IntSubset);
+
+        next!(stream, NotationDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, System);
+        next!(stream, Whitespace(" "));
+        next!(stream, Public);
+        next!(stream, Public);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("bar"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_notation_decl_public() {
+        let mut stream = with_state(r#"<!NOTATION foo PUBLIC "bar" "baz">"#, State::IntSubset);
+
+        next!(stream, NotationDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Public);
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("bar"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("baz"));
+        next!(stream, MarkupDeclEnd);
+    }
+
+    #[test]
+    fn test_notation_no_system_public() {
+        let mut stream = with_state(r#"<!NOTATION foo PUB "bar" "baz">"#, State::IntSubset);
+
+        next!(stream, NotationDecl);
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("foo"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Name("PUB"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("bar"));
+        next!(stream, Whitespace(" "));
+        next!(stream, Literal("baz"));
+        next!(stream, MarkupDeclEnd);
     }
 }

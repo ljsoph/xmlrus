@@ -6,6 +6,7 @@
     <!ELEMENT yo ANY>
     <!ELEMENT hi (#PCDATA | hello | world)*>
     <!ELEMENT div1 (head, (p | list | note)*, div2*)>
+    <!NOTATION mani SYSTEM "foobarbaz">
     <!-- <!ELEMENT dictionary-body (%div.mix; | %dict.mix;)*> -->
 ]>
 
