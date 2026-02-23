@@ -1,4 +1,4 @@
-use crate::document::{DTD, Document, Encoding, Notation, XmlVersion};
+use crate::document::{DTD, Document, Encoding, EntityType, Notation, XmlVersion};
 
 #[derive(Default, Debug)]
 pub struct Context<'a> {
@@ -96,5 +96,31 @@ impl<'a> Context<'a> {
         }
 
         dtd.notations.insert(name, Notation::new(public_id, system_id));
+    }
+
+    pub(crate) fn emit_entity_decl(&mut self, name: &'a str, entity_type: EntityType<'a>) {
+        let Some(dtd) = self.doc.dtd.as_mut() else {
+            return;
+        };
+
+        // No entity names, processing instruction targets, or notation names contain any colons.
+        if name.contains(":") {
+            panic!("colons are not allowed in entity names!")
+        }
+
+        match entity_type {
+            EntityType::InternalGeneral { value } => todo!(),
+            EntityType::InternalParameter { value } => todo!(),
+            EntityType::InternalPredefined { value } => todo!(),
+            EntityType::ExternalGeneralParsed { system_id, public_id } => todo!(),
+            EntityType::ExternalGeneralUnparsed {
+                system_id,
+                public_id,
+                ndata,
+            } => todo!(),
+            EntityType::ExternalParameter { system_id, public_id } => todo!(),
+        }
+
+        unimplemented!("emit_entity_decl")
     }
 }

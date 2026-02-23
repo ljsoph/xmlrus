@@ -1,6 +1,7 @@
 use crate::context::Context;
 use crate::document::Document;
 use crate::document::Encoding;
+use crate::document::EntityType;
 use crate::document::XmlVersion;
 use crate::error::ParseResult;
 use crate::lexer::Lexer;
@@ -292,9 +293,8 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
     let name = stream.expect_and_get_name()?;
     ctx.initialize_dtd(name);
 
-    if let Some((_system_id, _public_id)) = parse_external_id(stream, false)? {
-        // TODO: add entity
-    }
+    // TODO: add entity
+    let (_system_id, _public_id) = parse_external_id(stream, false)?;
 
     stream.consume_whitespace();
     if stream.is(TokenKind::IntSubsetStart) {
@@ -305,8 +305,8 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) 
             match stream.current() {
                 TokenKind::IntSubsetEnd => break,
                 TokenKind::ElementDecl => parse_element_type_decl(stream)?,
-                TokenKind::EntityDecl => parse_entity_decl(stream)?,
-                TokenKind::AttlistDecl => parse_attlist_decl(stream)?,
+                TokenKind::EntityDecl => parse_entity_decl(stream, ctx)?,
+                TokenKind::AttlistDecl => parse_attlist_decl(stream, ctx)?,
                 TokenKind::NotationDecl => parse_notation_decl(stream, ctx)?,
                 TokenKind::PIStart => parse_processing_instruction(stream)?,
                 TokenKind::Comment(_) => parse_comment(stream)?,
@@ -590,7 +590,7 @@ fn parse_mixed<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 }
 
 /// [52] AttlistDecl  ::=  '<!ATTLIST' S Name AttDef* S? '>'
-fn parse_attlist_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+fn parse_attlist_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.advance();
     stream.expect_whitespace("after AttlistDecl")?;
 
@@ -810,65 +810,75 @@ fn parse_pe_reference<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 }
 
 /// [70] EntityDecl  ::=  GEDecl | PEDecl
-/// [71] GEDecl      ::=  '<!ENTITY' S Name S EntityDef S? '>'
-/// [72] PEDecl      ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
-fn parse_entity_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+fn parse_entity_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.expect(TokenKind::EntityDecl)?;
     stream.expect_whitespace("after EntityDecl")?;
 
     if let TokenKind::Percent = stream.current() {
-        stream.advance();
-        stream.expect_whitespace("before PEDecl name")?;
-        let _name = stream.expect_and_get_name()?;
-        stream.expect_whitespace("after PEDecl name")?;
-        parse_pe_def(stream)?;
-        stream.consume_whitespace();
+        parse_parameter_entity_decl(stream, ctx)?;
     } else {
-        parse_entity_def(stream)?;
+        parse_general_entity_decl(stream, ctx)?;
     }
+
+    Ok(())
+}
+
+/// [71] GEDecl      ::=  '<!ENTITY' S Name S EntityDef S? '>'
+/// [73] EntityDef   ::=  EntityValue | (ExternalID NDataDecl?)
+fn parse_general_entity_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+    let name = stream.expect_and_get_name()?;
+    stream.expect_whitespace("after EntityDecl name")?;
+
+    let entity_type = {
+        if let TokenKind::Literal(value) = stream.current() {
+            stream.advance();
+            EntityType::InternalGeneral { value }
+        } else {
+            let (system_id, public_id) = parse_external_id(stream, true)?;
+
+            stream.consume_whitespace();
+
+            if let TokenKind::NData = stream.current() {
+                let ndata = parse_ndata_decl(stream)?;
+                EntityType::ExternalGeneralUnparsed {
+                    system_id,
+                    public_id,
+                    ndata,
+                }
+            } else {
+                EntityType::ExternalGeneralParsed { system_id, public_id }
+            }
+        }
+    };
 
     stream.consume_whitespace();
     stream.expect(TokenKind::MarkupDeclEnd)?;
 
+    ctx.emit_entity_decl(name, entity_type);
+
     Ok(())
 }
 
-/// [73] EntityDef   ::=  EntityValue | (ExternalID NDataDecl?)
-fn parse_entity_def<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+/// [72] PEDecl  ::=  '<!ENTITY' S '%' S Name S PEDef S? '>'
+/// [74] PEDef   ::=  EntityValue | ExternalID
+fn parse_parameter_entity_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+    stream.advance();
+    stream.expect_whitespace("before PEDecl name")?;
     let _name = stream.expect_and_get_name()?;
-    stream.expect_whitespace("after EntityDecl name")?;
+    stream.expect_whitespace("after PEDecl name")?;
 
-    if let TokenKind::Literal(_entity_value) = stream.current() {
-        // TODO: Add EntityType::InternalGeneral { entity_value }
-        stream.advance();
-        return Ok(());
-    }
+    let entity_type = {
+        if let TokenKind::Literal(value) = stream.current() {
+            stream.advance();
+            EntityType::InternalParameter { value }
+        } else {
+            let (system_id, public_id) = parse_external_id(stream, true)?;
+            EntityType::ExternalParameter { system_id, public_id }
+        }
+    };
 
-    // `parse_external_id()` will already bubble an error for a missing/malformed ExternalId
-    // so it should be safe to use `expect()` here.
-    let (_system_id, _public_id) = parse_external_id(stream, true)?.expect("missing required ExternalId in EntityDef");
     stream.consume_whitespace();
-
-    if let TokenKind::NData = stream.current() {
-        // TODO: Add EntityType::ExernalGeneralUnparsed { system_id, public_id, ndata}
-        let _ndata = parse_ndata_decl(stream)?;
-    } else {
-        // TODO: Add EntityType::ExernalGeneralParsed { system_id, public_id }
-    }
-
-    Ok(())
-}
-
-/// [74]  PEDef  ::=  EntityValue | ExternalID
-fn parse_pe_def<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    if let TokenKind::Literal(_value) = stream.current() {
-        stream.advance();
-        // TODO: Entity::new(name, EntityType::InternalGeneral { value })
-    } else {
-        let (_system_id, _public_id) =
-            parse_external_id(stream, true)?.expect("missing required ExternalId in EntityDef");
-        // TODO: Entity::new(name, EntityType::ExternalGeneralParsed { system_id, public_id })
-    }
+    stream.expect(TokenKind::MarkupDeclEnd)?;
 
     Ok(())
 }
@@ -877,14 +887,14 @@ fn parse_pe_def<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 fn parse_external_id<'a>(
     stream: &mut TokenStream<'a>,
     required: bool,
-) -> ParseResult<Option<(&'a str, Option<&'a str>)>> {
+) -> ParseResult<(Option<&'a str>, Option<&'a str>)> {
     stream.consume_whitespace();
 
     if stream.is(TokenKind::System) {
         stream.advance();
         stream.expect_whitespace("ExternalID SystemLiteral")?;
         let system_id = stream.expect_and_get_literal()?;
-        return Ok(Some((system_id, None)));
+        return Ok((Some(system_id), None));
     }
 
     if stream.is(TokenKind::Public) {
@@ -894,13 +904,13 @@ fn parse_external_id<'a>(
         stream.expect_whitespace("ExternalID SystemLiteral")?;
         let system_id = stream.expect_and_get_literal()?;
 
-        return Ok(Some((system_id, Some(public_id))));
+        return Ok((Some(system_id), Some(public_id)));
     }
 
     if required {
         panic!("missing required external id")
     } else {
-        Ok(None)
+        Ok((None, None))
     }
 }
 
