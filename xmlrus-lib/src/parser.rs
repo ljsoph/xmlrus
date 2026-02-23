@@ -1,3 +1,7 @@
+use crate::context::Context;
+use crate::document::Document;
+use crate::document::Encoding;
+use crate::document::XmlVersion;
 use crate::error::ParseResult;
 use crate::lexer::Lexer;
 use crate::lexer::TokenKind;
@@ -99,17 +103,27 @@ impl<'a> TokenStream<'a> {
 }
 
 pub fn parse<'a>(source: &'a str) {
-    let lexer = Lexer::new(source);
-    let mut stream = TokenStream { lexer };
-    let _ = parse_document(&mut stream);
+    let mut stream = TokenStream {
+        lexer: Lexer::new(source),
+    };
+    let mut ctx = Context {
+        doc: Document::new(),
+        validate: true,
+        version: XmlVersion::V1_0,
+        encoding: Encoding::Utf8,
+        standalone: false,
+    };
+    let _ = parse_document(&mut stream, &mut ctx);
+
+    dbg!(ctx);
 }
 
 /// Parses the source input, emitting a stream of tokens to build up the
 /// resulting `Document`
 ///
 /// [1] Document  ::=  prolog element Misc*
-fn parse_document<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
-    parse_prolog(stream)?;
+fn parse_document<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
+    parse_prolog(stream, ctx)?;
 
     stream.consume_whitespace();
 
@@ -192,17 +206,17 @@ fn parse_cdata<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 }
 
 /// [22] prolog  ::=  XMLDecl? Misc* (doctypedecl Misc*)?
-fn parse_prolog<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+fn parse_prolog<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     // There can only be one XML declaration, and it must be at the absolute start
     // of the Document, i.e., no characters are allowed before it (including whitespace)
     if let TokenKind::XmlDeclStart = stream.current() {
-        parse_xml_decl(stream)?;
+        parse_xml_decl(stream, ctx)?;
     }
 
     parse_misc(stream)?;
 
     if stream.current() == TokenKind::DTDStart {
-        parse_doc_type_decl(stream)?;
+        parse_doc_type_decl(stream, ctx)?;
         parse_misc(stream)?
     }
 
@@ -216,54 +230,34 @@ fn parse_prolog<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 /// [80] EncodingDecl  ::=   S 'encoding' Eq ('"' EncName '"' | "'" EncName "'" )
 /// [81] EncName       ::=   [A-Za-z] ([A-Za-z0-9._] | '-')* /* Encoding name contains only Latin characters */
 /// [32] SDDecl        ::=   S 'standalone' Eq (("'" ('yes' | 'no') "'") | ('"' ('yes' | 'no') '"'))
-fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+fn parse_xml_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.expect(TokenKind::XmlDeclStart)?;
     stream.expect_whitespace("before document version")?;
     stream.expect(TokenKind::Version)?;
     stream.expect(TokenKind::Equal)?;
 
     let version = stream.expect_and_get_literal()?;
-    if !version.starts_with("1.0") {
-        panic!("version must be 1.x")
+    ctx.set_version(version);
+
+    stream.consume_whitespace();
+    if let TokenKind::Encoding = stream.current() {
+        stream.expect_preceeding_whitespace("encoding")?;
+        stream.advance();
+        stream.expect(TokenKind::Equal)?;
+
+        let encoding = stream.expect_and_get_literal()?;
+        ctx.set_encoding(encoding);
     }
 
-    let _encoding = {
-        let ws = stream.consume_whitespace();
-        if let TokenKind::Encoding = stream.current() {
-            if !ws {
-                panic!("missing required ws before encoding");
-            }
-            stream.advance();
-            stream.expect(TokenKind::Equal)?;
+    stream.consume_whitespace();
+    if let TokenKind::Standalone = stream.current() {
+        stream.expect_preceeding_whitespace("standalone")?;
+        stream.advance();
+        stream.expect(TokenKind::Equal)?;
 
-            // TODO: encoding validation
-            let encoding = stream.expect_and_get_literal();
-            Some(encoding)
-        } else {
-            None
-        }
-    };
-
-    let _standalone = {
-        let ws = stream.consume_whitespace();
-        if let TokenKind::Standalone = stream.current() {
-            if !ws {
-                panic!("missing required ws before standalone");
-            }
-            stream.advance();
-            stream.expect(TokenKind::Equal)?;
-
-            // TODO: standalone validation
-            let standalone = stream.expect_and_get_literal()?;
-            if standalone != "yes" && standalone != "no" {
-                panic!("invalid standalone")
-            }
-
-            Some(standalone)
-        } else {
-            None
-        }
-    };
+        let standalone = stream.expect_and_get_literal()?;
+        ctx.set_standalone(standalone);
+    }
 
     // TODO: add node
     stream.consume_whitespace();
@@ -291,12 +285,13 @@ fn parse_misc<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
 /// [28a] DeclSep     ::=   PEReference | S
 /// [28b] intSubset   ::=   (markupdecl | DeclSep)*
 /// [29]  markupdecl  ::=   elementdecl | AttlistDecl | EntityDecl | NotationDecl | PI | Comment
-fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.advance();
     stream.expect_whitespace("before DTD name")?;
 
-    // TODO: add document name
-    let _name = stream.expect_and_get_name()?;
+    let name = stream.expect_and_get_name()?;
+    ctx.initialize_dtd(name);
+
     if let Some((_system_id, _public_id)) = parse_external_id(stream, false)? {
         // TODO: add entity
     }
@@ -312,7 +307,7 @@ fn parse_doc_type_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
                 TokenKind::ElementDecl => parse_element_type_decl(stream)?,
                 TokenKind::EntityDecl => parse_entity_decl(stream)?,
                 TokenKind::AttlistDecl => parse_attlist_decl(stream)?,
-                TokenKind::NotationDecl => parse_notation_decl(stream)?,
+                TokenKind::NotationDecl => parse_notation_decl(stream, ctx)?,
                 TokenKind::PIStart => parse_processing_instruction(stream)?,
                 TokenKind::Comment(_) => parse_comment(stream)?,
                 TokenKind::Percent => parse_pe_reference(stream)?,
@@ -576,7 +571,7 @@ fn parse_mixed<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
         match stream.current() {
             TokenKind::RightParen => {
                 stream.advance();
-                if (!names.is_empty()) {
+                if !names.is_empty() {
                     stream.expect(TokenKind::Star)?;
                 }
                 break;
@@ -919,37 +914,40 @@ fn parse_ndata_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<&'a str> {
 
 /// [82] NotationDecl  ::=  '<!NOTATION' S Name S (ExternalID | PublicID) S? '>'
 /// [83] PublicID      ::=  'PUBLIC' S PubidLiteral
-fn parse_notation_decl<'a>(stream: &mut TokenStream<'a>) -> ParseResult<()> {
+fn parse_notation_decl<'a>(stream: &mut TokenStream<'a>, ctx: &mut Context<'a>) -> ParseResult<()> {
     stream.advance();
     stream.expect_whitespace("after <!NOTATION")?;
-    let _name = stream.expect_and_get_name()?;
+    let name = stream.expect_and_get_name()?;
     stream.expect_whitespace("after NotationDecl name")?;
 
     // Three paths we can take
     // 1: SYSTEM SystemLiteral
     // 2: PUBLIC PubidLiteral
     // 3: PUBLIC PubidLiteral SystemLiteral
-    let current = stream.current();
     match stream.current() {
         TokenKind::System => {
             stream.advance();
             stream.expect_whitespace("After SYSTEM in NotationDecl")?;
+
             let system_id = stream.expect_and_get_literal()?;
+            ctx.emit_notation_decl(name, None, Some(system_id));
         }
         TokenKind::Public => {
             stream.advance();
             stream.expect_whitespace("After PUBLIC in NotationDecl")?;
-            let _public_id = stream.expect_and_get_literal()?;
+            let public_id = Some(stream.expect_and_get_literal()?);
 
-            let _system_id = {
+            let system_id = {
                 stream.consume_whitespace();
-                if let TokenKind::Literal(_system_id) = stream.current() {
+                if let TokenKind::Literal(system_id) = stream.current() {
                     stream.expect_preceeding_whitespace("System Literal in Notation Decl")?;
-                    Some(_system_id)
+                    Some(system_id)
                 } else {
                     None
                 }
             };
+
+            ctx.emit_notation_decl(name, public_id, system_id);
         }
         kind => panic!("expected ExternalId or PublicId in NotationDecl, got {kind:?}"),
     }

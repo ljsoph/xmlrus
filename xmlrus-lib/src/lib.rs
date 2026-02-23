@@ -9,6 +9,8 @@ use error::ParseResult;
 use error::SyntaxError;
 use error::ValidationError;
 
+mod context;
+mod document;
 pub mod error;
 pub mod lexer;
 pub mod parser;
